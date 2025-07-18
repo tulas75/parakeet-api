@@ -1,0 +1,59 @@
+# Git 相关
+.git
+.gitignore
+.gitattributes
+
+# Docker 相关
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# 临时文件和缓存
+temp_uploads/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesis
+
+# IDE 相关
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS 相关
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 文档和说明
+README.md
+*.md
+LICENSE
+
+# 可选：模型文件（如果太大可以在运行时挂载）
+# models/
+
+# 测试文件
+test*
+tests/ 

@@ -1,0 +1,5 @@
+models/
+models/hub
+temp_uploads/*
+venv
+*.bat

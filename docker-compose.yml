@@ -1,0 +1,33 @@
+version: '3.8'
+services:
+  parakeet-api-docker:
+    container_name: parakeet-api-docker
+    image: ghcr.io/fqscfqj/parakeet-api-docker:latest
+    ports:
+      - "5092:5092"
+    volumes:
+      - ./models:/app/models:ro
+      - ./temp_uploads:/app/temp_uploads
+    environment:
+      - CHUNK_MINITE=10
+      - IDLE_TIMEOUT_MINUTES=30
+      - ENABLE_LAZY_LOAD=true
+      - API_KEY=
+      - PUID=1000
+      - PGID=1000
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5092/', timeout=10)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # 重启策略
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

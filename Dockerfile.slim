@@ -1,0 +1,93 @@
+# 超轻量版本：进一步优化镜像体积
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+
+# 设置环境变量
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# 创建非root用户
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# 安装系统依赖，使用最小化安装
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10-minimal \
+    python3-pip \
+    ffmpeg \
+    gosu \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/* \
+    && rm -rf /usr/share/doc/* \
+    && rm -rf /usr/share/man/*
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制requirements.txt
+COPY requirements.txt .
+
+# 安装Python依赖，使用最小化安装
+RUN pip install --no-cache-dir --no-compile \
+    numpy \
+    typing_extensions \
+    Cython \
+    && pip install --no-cache-dir --no-compile -r requirements.txt \
+    && pip cache purge \
+    && find /usr/local -name "*.pyc" -delete \
+    && find /usr/local -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# 复制应用代码
+COPY --chown=appuser:appuser app.py .
+
+# 创建必要的目录
+RUN mkdir -p /app/models /app/temp_uploads \
+    && chown -R appuser:appuser /app
+
+# 设置环境变量
+ENV HF_HOME=/app/models \
+    HF_HUB_DISABLE_SYMLINKS_WARNING=true \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    CUDA_LAUNCH_BLOCKING=1
+
+# 创建启动脚本
+RUN echo '#!/bin/bash\n\
+# 使用环境变量中的UID/GID调整用户权限\n\
+PUID=${PUID:-1000}\n\
+PGID=${PGID:-1000}\n\
+\n\
+echo "配置用户权限: UID=$PUID, GID=$PGID"\n\
+\n\
+# 调整appuser的UID/GID\n\
+if [ "$PUID" != "$(id -u appuser)" ]; then\n\
+    echo "调整appuser UID从 $(id -u appuser) 到 $PUID"\n\
+    usermod -u $PUID appuser 2>/dev/null || true\n\
+fi\n\
+if [ "$PGID" != "$(id -g appuser)" ]; then\n\
+    echo "调整appuser GID从 $(id -g appuser) 到 $PGID"\n\
+    groupmod -g $PGID appuser 2>/dev/null || true\n\
+fi\n\
+\n\
+# 确保目录权限正确\n\
+chown -R appuser:appuser /app/temp_uploads\n\
+\n\
+# 如果models目录存在，尝试调整权限\n\
+if [ -d "/app/models" ]; then\n\
+    chown -R appuser:appuser /app/models 2>/dev/null || true\n\
+fi\n\
+\n\
+# 切换到appuser并启动应用\n\
+exec gosu appuser python3 app.py\n\
+' > /usr/local/bin/start.sh && chmod +x /usr/local/bin/start.sh
+
+# 暴露端口
+EXPOSE 5092
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5092/', timeout=10)" || exit 1
+
+# 启动命令
+CMD ["/usr/local/bin/start.sh"] 
