@@ -177,7 +177,7 @@ jobs:
       - name: 🔍 Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
@@ -212,6 +212,7 @@ jobs:
         run: |
           echo "更新Slim版镜像描述..."
           docker buildx imagetools create \
+            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
             --annotation "index:org.opencontainers.image.description=🎙️ NeMo Parakeet ASR API - 高性能语音识别服务，支持长音频分片处理、GPU加速和多种输出格式。Slim version with optimized size and performance." \
             --annotation "index:org.opencontainers.image.documentation=https://github.com/fqscfqj/parakeet-api-docker" \
             --annotation "index:org.opencontainers.image.source=https://github.com/fqscfqj/parakeet-api-docker" \
@@ -234,8 +235,12 @@ jobs:
 
       - name: 🧪 Test image startup
         run: |
-          # 设置镜像名称
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          # 设置镜像名称 - 使用latest标签或根据分支/事件类型确定标签
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          else
+            IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          fi
           
           echo "测试镜像: $IMAGE_TAG"
           
