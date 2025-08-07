@@ -44,7 +44,8 @@ RUN pip install --no-cache-dir --no-compile \
     && pip install --no-cache-dir --no-compile -r requirements.txt \
     && pip cache purge \
     && find /usr/local -name "*.pyc" -delete \
-    && find /usr/local -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+    && find /usr/local -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true \
+    && python3 -c "import flask; print('Flask version:', flask.__version__)"
 
 # 复制应用代码和健康检查脚本
 COPY --chown=appuser:appuser app.py .
