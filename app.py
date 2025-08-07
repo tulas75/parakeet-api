@@ -5,11 +5,22 @@ os.environ['NUMBA_CACHE_DIR'] = '/tmp/numba_cache'
 os.environ['NUMBA_DISABLE_JIT'] = '0'
 
 # 设置matplotlib配置目录，避免权限问题
+# 优先使用启动脚本设置的目录，如果不存在则使用备用目录
 if 'MPLCONFIGDIR' not in os.environ:
     os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib_config'
-    # 确保目录存在
     os.makedirs('/tmp/matplotlib_config', exist_ok=True)
     os.chmod('/tmp/matplotlib_config', 0o777)
+else:
+    # 确保已设置的目录存在且有正确权限
+    mpl_dir = os.environ['MPLCONFIGDIR']
+    try:
+        os.makedirs(mpl_dir, exist_ok=True)
+        os.chmod(mpl_dir, 0o755)
+    except (PermissionError, OSError):
+        # 如果无法创建或设置权限，回退到tmp目录
+        os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib_config'
+        os.makedirs('/tmp/matplotlib_config', exist_ok=True)
+        os.chmod('/tmp/matplotlib_config', 0o777)
 
 host = '0.0.0.0'
 port = 5092

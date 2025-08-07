@@ -8,8 +8,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 创建非root用户
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+# 创建非root用户并创建主目录
+RUN groupadd -r appuser && useradd -r -m -g appuser appuser
 
 # 安装系统依赖，使用最小化安装
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -73,6 +73,18 @@ PGID=${PGID:-1000}\n\
 \n\
 echo "配置用户权限: UID=$PUID, GID=$PGID"\n\
 \n\
+# 首先确保所有必要的目录存在（以root权限创建）\n\
+mkdir -p /home/appuser\n\
+mkdir -p /home/appuser/.config/matplotlib\n\
+mkdir -p /home/appuser/.lhotse/tools\n\
+mkdir -p /app/temp_uploads\n\
+mkdir -p /tmp/numba_cache\n\
+mkdir -p /tmp/matplotlib_config\n\
+\n\
+# 设置tmp目录的权限（所有人可写）\n\
+chmod 777 /tmp/numba_cache\n\
+chmod 777 /tmp/matplotlib_config\n\
+\n\
 # 调整appuser的UID/GID\n\
 if [ "$PUID" != "$(id -u appuser)" ]; then\n\
     echo "调整appuser UID从 $(id -u appuser) 到 $PUID"\n\
@@ -84,26 +96,14 @@ if [ "$PGID" != "$(id -g appuser)" ]; then\n\
     usermod -g $PGID appuser 2>/dev/null || true\n\
 fi\n\
 \n\
-# 创建并设置用户主目录权限\n\
-mkdir -p /home/appuser\n\
+# 设置用户目录权限\n\
 chown -R appuser:$PGID /home/appuser\n\
 chmod 755 /home/appuser\n\
-\n\
-# 创建配置目录\n\
-mkdir -p /home/appuser/.config/matplotlib\n\
-mkdir -p /home/appuser/.lhotse/tools\n\
-chown -R appuser:$PGID /home/appuser/.config\n\
-chown -R appuser:$PGID /home/appuser/.lhotse\n\
 chmod -R 755 /home/appuser/.config\n\
 chmod -R 755 /home/appuser/.lhotse\n\
 \n\
 # 确保应用目录权限正确\n\
 chown -R appuser:$PGID /app/temp_uploads\n\
-\n\
-# 确保numba缓存目录权限正确\n\
-mkdir -p /tmp/numba_cache\n\
-chmod 777 /tmp/numba_cache\n\
-chown -R appuser:$PGID /tmp/numba_cache 2>/dev/null || true\n\
 \n\
 # 如果models目录存在，尝试调整权限\n\
 if [ -d "/app/models" ]; then\n\
