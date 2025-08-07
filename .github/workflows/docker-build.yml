@@ -34,6 +34,9 @@ jobs:
   build:
     name: 🔨 Build Slim Image
     runs-on: ubuntu-latest
+    outputs:
+      should-push: ${{ steps.check-push.outputs.should-push }}
+      image-tags: ${{ steps.meta.outputs.tags }}
     
     permissions:
       contents: read
@@ -42,6 +45,31 @@ jobs:
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
+
+      - name: 🔍 Check push conditions
+        id: check-push
+        run: |
+          echo "=== 推送条件调试信息 ==="
+          echo "Event name: ${{ github.event_name }}"
+          echo "Push image input: ${{ github.event.inputs.push_image }}"
+          echo "Is default branch: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
+          echo "Current ref: ${{ github.ref }}"
+          echo "Actor: ${{ github.actor }}"
+          echo ""
+          
+          # 计算是否应该推送
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            if [[ "${{ github.event_name }}" != "workflow_dispatch" ]] || [[ "${{ github.event.inputs.push_image }}" != "false" ]]; then
+              echo "should-push=true" >> $GITHUB_OUTPUT
+              echo "✅ 将推送镜像到 GHCR"
+            else
+              echo "should-push=false" >> $GITHUB_OUTPUT
+              echo "❌ 不推送镜像 (手动触发且设置为 false)"
+            fi
+          else
+            echo "should-push=false" >> $GITHUB_OUTPUT
+            echo "❌ 不推送镜像 (Pull Request)"
+          fi
 
       - name: 🧹 Free up disk space
         run: |
@@ -83,7 +111,7 @@ jobs:
             network=host
 
       - name: 🔐 Log in to Container Registry
-        if: github.event_name != 'pull_request' && (github.event.inputs.push_image != false)
+        if: ${{ steps.check-push.outputs.should-push == 'true' }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -114,7 +142,7 @@ jobs:
           context: .
           file: Dockerfile.slim
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' && (github.event.inputs.push_image != false) }}
+          push: ${{ steps.check-push.outputs.should-push == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -136,14 +164,34 @@ jobs:
           echo "=== 清理后磁盘使用情况 ==="
           df -h
 
+      - name: ✅ Verify push success
+        if: ${{ steps.check-push.outputs.should-push == 'true' }}
+        run: |
+          echo "=== 验证镜像推送状态 ==="
+          
+          # 等待一下让镜像完全推送完成
+          sleep 5
+          
+          # 检查镜像是否成功推送到 GHCR
+          if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest > /dev/null 2>&1; then
+            echo "✅ 镜像已成功推送到 GHCR"
+            echo "🔗 镜像地址: https://github.com/fqscfqj/parakeet-api-docker/pkgs/container/parakeet-api-docker"
+          else
+            echo "❌ 镜像推送可能失败，请检查权限和网络"
+            exit 1
+          fi
+
       - name: 📋 Output image info
-        if: github.event_name != 'pull_request' && (github.event.inputs.push_image != false)
+        if: ${{ steps.check-push.outputs.should-push == 'true' }}
         run: |
           echo "## 🐳 Parakeet ASR API Docker镜像构建完成" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**镜像版本:** Slim (轻量优化版)" >> $GITHUB_STEP_SUMMARY
           echo "**Dockerfile:** Dockerfile.slim" >> $GITHUB_STEP_SUMMARY
           echo "**支持平台:** linux/amd64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**📦 GHCR 镜像地址:**" >> $GITHUB_STEP_SUMMARY
+          echo "🔗 https://github.com/fqscfqj/parakeet-api-docker/pkgs/container/parakeet-api-docker" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**标签信息:**" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
@@ -159,7 +207,7 @@ jobs:
     name: 🔍 Security Scan
     runs-on: ubuntu-latest
     needs: [build]
-    if: always() && github.event_name != 'pull_request' && needs.build.result == 'success'
+    if: always() && needs.build.outputs.should-push == 'true' && needs.build.result == 'success'
     
     permissions:
       contents: read
@@ -192,7 +240,7 @@ jobs:
     name: 📝 Update Package Description
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.build.result == 'success'
+    if: github.ref == 'refs/heads/main' && needs.build.outputs.should-push == 'true' && needs.build.result == 'success'
     
     permissions:
       packages: write
@@ -225,7 +273,7 @@ jobs:
     name: 🎉 Notify Completion
     runs-on: ubuntu-latest
     needs: [build, security-scan]
-    if: always() && github.event_name != 'pull_request'
+    if: always() && needs.build.outputs.should-push == 'true'
     
     steps:
       - name: 📊 Generate summary
