@@ -1,5 +1,5 @@
 # 多阶段构建：第一阶段用于编译依赖
-FROM nvidia/cuda:12.1.1-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.3.2-devel-ubuntu22.04 AS builder
 
 # 设置环境变量，避免交互式安装
 ENV DEBIAN_FRONTEND=noninteractive
@@ -20,6 +20,12 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # 复制requirements.txt并安装Python依赖
 COPY requirements.txt /tmp/requirements.txt
+
+# 设置CUDA环境变量确保cuda-python能找到CUDA安装
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=$CUDA_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
 RUN pip install --no-cache-dir \
     numpy \
     typing_extensions \
@@ -27,7 +33,7 @@ RUN pip install --no-cache-dir \
     && pip install --no-cache-dir -r /tmp/requirements.txt
 
 # 第二阶段：运行时镜像
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.3.2-runtime-ubuntu22.04
 
 # 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive
@@ -71,6 +77,11 @@ ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ENV CUDA_LAUNCH_BLOCKING=1
 ENV NUMBA_CACHE_DIR=/tmp/numba_cache
 ENV NUMBA_DISABLE_JIT=0
+
+# 设置CUDA环境变量确保运行时能找到CUDA
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=$CUDA_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 
 # 创建启动脚本
 RUN echo '#!/bin/bash\n\
