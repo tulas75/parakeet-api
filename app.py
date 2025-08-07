@@ -44,6 +44,7 @@ import psutil
 asr_model = None
 last_request_time = None
 model_lock = threading.Lock()
+cuda_available = False  # 全局CUDA兼容性标志
 
 # 显存优化配置
 AGGRESSIVE_MEMORY_CLEANUP = os.environ.get('AGGRESSIVE_MEMORY_CLEANUP', 'true').lower() in ['true', '1', 't']
@@ -68,103 +69,110 @@ if not os.path.exists('/app/temp_uploads'):
 
 def setup_tensor_core_optimization():
     """配置Tensor Core优化设置"""
-    if not torch.cuda.is_available():
+    global cuda_available
+    if not cuda_available:
+        print("CUDA不可用，跳过Tensor Core优化配置")
         return
     
     print("正在配置 Tensor Core 优化...")
     
-    # 启用 cuDNN benchmark 模式
-    if ENABLE_CUDNN_BENCHMARK:
-        cudnn.benchmark = True
-        cudnn.deterministic = False  # 为了性能，允许非确定性
-        print("✅ cuDNN benchmark 已启用")
-    else:
-        cudnn.benchmark = False
-        cudnn.deterministic = True
-        print("❌ cuDNN benchmark 已禁用（确定性模式）")
-    
-    # 启用 cuDNN 允许 TensorCore
-    if ENABLE_TENSOR_CORE:
-        cudnn.allow_tf32 = True  # 允许TF32（A100等支持）
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        print("✅ Tensor Core (TF32) 已启用")
-    else:
-        cudnn.allow_tf32 = False
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        print("❌ Tensor Core 已禁用")
-    
-    # 设置 Tensor Core 精度策略
-    if TENSOR_CORE_PRECISION == 'highest':
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-        print("✅ 设置为最高精度模式")
-    elif TENSOR_CORE_PRECISION == 'high':
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
-        print("✅ 设置为高精度模式")
-    else:  # medium
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
-        print("✅ 设置为中等精度模式")
-    
-    # 设置内存分配策略以优化 Tensor Core 使用
     try:
+        # 启用 cuDNN benchmark 模式
+        if ENABLE_CUDNN_BENCHMARK:
+            cudnn.benchmark = True
+            cudnn.deterministic = False  # 为了性能，允许非确定性
+            print("✅ cuDNN benchmark 已启用")
+        else:
+            cudnn.benchmark = False
+            cudnn.deterministic = True
+            print("❌ cuDNN benchmark 已禁用（确定性模式）")
+        
+        # 启用 cuDNN 允许 TensorCore
+        if ENABLE_TENSOR_CORE:
+            cudnn.allow_tf32 = True  # 允许TF32（A100等支持）
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            print("✅ Tensor Core (TF32) 已启用")
+        else:
+            cudnn.allow_tf32 = False
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+            print("❌ Tensor Core 已禁用")
+        
+        # 设置 Tensor Core 精度策略
+        if TENSOR_CORE_PRECISION == 'highest':
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+            print("✅ 设置为最高精度模式")
+        elif TENSOR_CORE_PRECISION == 'high':
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+            print("✅ 设置为高精度模式")
+        else:  # medium
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+            print("✅ 设置为中等精度模式")
+        
+        # 设置内存分配策略以优化 Tensor Core 使用
         torch.cuda.set_per_process_memory_fraction(0.95)  # 使用95%的显存
         print("✅ GPU 内存分配策略已优化")
     except Exception as e:
-        print(f"⚠️ 无法设置GPU内存分配: {e}")
+        print(f"⚠️ Tensor Core优化配置失败: {e}")
 
 def get_tensor_core_info():
     """获取 Tensor Core 支持信息"""
-    if not torch.cuda.is_available():
+    global cuda_available
+    if not cuda_available:
         return "N/A - CUDA不可用"
     
-    device = torch.cuda.get_device_properties(0)
-    major, minor = device.major, device.minor
-    
-    # 检测 Tensor Core 支持
-    if major >= 7:  # V100, T4, RTX 20/30/40系列等
-        if major == 7:
-            return f"✅ Tensor Core 1.0 (计算能力 {major}.{minor})"
-        elif major == 8:
-            if minor >= 0:
-                return f"✅ Tensor Core 2.0 + TF32 (计算能力 {major}.{minor})"
-            else:
-                return f"✅ Tensor Core 2.0 (计算能力 {major}.{minor})"
-        elif major >= 9:
-            return f"✅ Tensor Core 3.0+ (计算能力 {major}.{minor})"
-    elif major >= 6:  # P100等
-        return f"⚠️ 有限Tensor Core支持 (计算能力 {major}.{minor})"
-    else:
-        return f"❌ 不支持Tensor Core (计算能力 {major}.{minor})"
-    
-    return f"未知 (计算能力 {major}.{minor})"
+    try:
+        device = torch.cuda.get_device_properties(0)
+        major, minor = device.major, device.minor
+        
+        # 检测 Tensor Core 支持
+        if major >= 7:  # V100, T4, RTX 20/30/40系列等
+            if major == 7:
+                return f"✅ Tensor Core 1.0 (计算能力 {major}.{minor})"
+            elif major == 8:
+                if minor >= 0:
+                    return f"✅ Tensor Core 2.0 + TF32 (计算能力 {major}.{minor})"
+                else:
+                    return f"✅ Tensor Core 2.0 (计算能力 {major}.{minor})"
+            elif major >= 9:
+                return f"✅ Tensor Core 3.0+ (计算能力 {major}.{minor})"
+        elif major >= 6:  # P100等
+            return f"⚠️ 有限Tensor Core支持 (计算能力 {major}.{minor})"
+        else:
+            return f"❌ 不支持Tensor Core (计算能力 {major}.{minor})"
+        
+        return f"未知 (计算能力 {major}.{minor})"
+    except Exception as e:
+        return f"❌ 获取GPU信息失败: {e}"
 
 def optimize_tensor_operations():
     """优化张量操作以更好地利用 Tensor Core"""
-    if not torch.cuda.is_available():
+    global cuda_available
+    if not cuda_available:
+        print("CUDA不可用，跳过Tensor Core预热")
         return
     
-    # 设置优化的 CUDA 流
-    torch.cuda.set_sync_debug_mode(0)  # 禁用同步调试以提升性能
-    
-    # 预热GPU，确保Tensor Core正确激活
-    if torch.cuda.is_available():
-        try:
-            # 创建一些对齐到8/16倍数的矩阵进行预热
-            device = torch.cuda.current_device()
-            dummy_a = torch.randn(128, 128, device=device, dtype=torch.float16)
-            dummy_b = torch.randn(128, 128, device=device, dtype=torch.float16)
-            
-            # 执行矩阵乘法预热Tensor Core
-            with torch.cuda.amp.autocast():
-                _ = torch.matmul(dummy_a, dummy_b)
-            
-            torch.cuda.synchronize()
-            del dummy_a, dummy_b
-            torch.cuda.empty_cache()
-            print("✅ Tensor Core 预热完成")
-        except Exception as e:
-            print(f"⚠️ Tensor Core 预热失败: {e}")
+    try:
+        # 设置优化的 CUDA 流
+        torch.cuda.set_sync_debug_mode(0)  # 禁用同步调试以提升性能
+        
+        # 预热GPU，确保Tensor Core正确激活
+        # 创建一些对齐到8/16倍数的矩阵进行预热
+        device = torch.cuda.current_device()
+        dummy_a = torch.randn(128, 128, device=device, dtype=torch.float16)
+        dummy_b = torch.randn(128, 128, device=device, dtype=torch.float16)
+        
+        # 执行矩阵乘法预热Tensor Core
+        with torch.cuda.amp.autocast():
+            _ = torch.matmul(dummy_a, dummy_b)
+        
+        torch.cuda.synchronize()
+        del dummy_a, dummy_b
+        torch.cuda.empty_cache()
+        print("✅ Tensor Core 预热完成")
+    except Exception as e:
+        print(f"⚠️ Tensor Core 预热失败: {e}")
 
 def detect_sentence_boundaries(text: str) -> list:
     """检测句子边界，返回句子结束位置列表"""
@@ -296,36 +304,91 @@ def create_overlap_chunks(total_duration: float, chunk_duration: float, overlap_
     
     return chunks
 
+def check_cuda_compatibility():
+    """检查CUDA兼容性，如果不兼容则禁用CUDA"""
+    global cuda_available
+    
+    try:
+        if not torch.cuda.is_available():
+            print("CUDA不可用，将使用CPU模式")
+            cuda_available = False
+            return False
+        
+        # 尝试获取设备数量来测试CUDA兼容性
+        device_count = torch.cuda.device_count()
+        if device_count == 0:
+            print("未检测到CUDA设备，将使用CPU模式")
+            cuda_available = False
+            return False
+            
+        # 尝试获取设备属性来进一步测试兼容性
+        device_props = torch.cuda.get_device_properties(0)
+        print(f"✅ 检测到兼容的GPU: {device_props.name}")
+        cuda_available = True
+        return True
+    except RuntimeError as e:
+        if "forward compatibility was attempted on non supported HW" in str(e):
+            print("⚠️ CUDA兼容性错误: GPU硬件不支持当前CUDA版本")
+            print("这通常是因为主机的GPU驱动版本过旧，不支持容器中的CUDA 12.3版本")
+            print("将自动切换到CPU模式运行")
+        elif "CUDA" in str(e):
+            print(f"⚠️ CUDA初始化失败: {e}")
+            print("将自动切换到CPU模式运行")
+        else:
+            print(f"⚠️ 未知CUDA错误: {e}")
+            print("将自动切换到CPU模式运行")
+        
+        cuda_available = False
+        return False
+    except Exception as e:
+        print(f"⚠️ GPU兼容性检查失败: {e}")
+        print("将自动切换到CPU模式运行")
+        cuda_available = False
+        return False
+
 def get_gpu_memory_usage():
     """获取GPU显存使用情况"""
-    if not torch.cuda.is_available():
+    global cuda_available
+    if not cuda_available:
         return 0, 0, 0
     
-    allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-    reserved = torch.cuda.memory_reserved() / 1024**3   # GB
-    total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
-    return allocated, reserved, total
+    try:
+        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+        reserved = torch.cuda.memory_reserved() / 1024**3   # GB
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+        return allocated, reserved, total
+    except Exception as e:
+        print(f"⚠️ 获取GPU内存信息失败: {e}")
+        return 0, 0, 0
 
 def aggressive_memory_cleanup():
     """激进的显存清理函数"""
-    if torch.cuda.is_available():
-        # 清空CUDA缓存
-        torch.cuda.empty_cache()
-        # 同步所有CUDA操作
-        torch.cuda.synchronize()
-        # 重置峰值内存统计
-        torch.cuda.reset_peak_memory_stats()
+    global cuda_available
+    if cuda_available:
+        try:
+            # 清空CUDA缓存
+            torch.cuda.empty_cache()
+            # 同步所有CUDA操作
+            torch.cuda.synchronize()
+            # 重置峰值内存统计
+            torch.cuda.reset_peak_memory_stats()
+        except Exception as e:
+            print(f"⚠️ CUDA清理操作失败: {e}")
     
     # 强制Python垃圾回收
     for _ in range(3):
         gc.collect()
     
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if cuda_available:
+        try:
+            torch.cuda.empty_cache()
+        except Exception as e:
+            print(f"⚠️ CUDA缓存清理失败: {e}")
 
 def should_force_cleanup():
     """检查是否需要强制清理显存"""
-    if not torch.cuda.is_available():
+    global cuda_available
+    if not cuda_available:
         return False
     
     allocated, reserved, total = get_gpu_memory_usage()
@@ -368,7 +431,7 @@ def create_streaming_config():
 
 def load_model_if_needed():
     """按需加载模型，如果模型未加载，则进行加载。"""
-    global asr_model
+    global asr_model, cuda_available
     # 使用锁确保多线程环境下模型只被加载一次
     with model_lock:
         if asr_model is None:
@@ -376,6 +439,9 @@ def load_model_if_needed():
             print("模型当前未加载，正在从磁盘加载...")
             print("模型名称: nvidia/parakeet-tdt-0.6b-v2")
             try:
+                # 首先检查CUDA兼容性
+                cuda_available = check_cuda_compatibility()
+                
                 # 确保numba缓存目录存在
                 numba_cache_dir = os.environ.get('NUMBA_CACHE_DIR', '/tmp/numba_cache')
                 if not os.path.exists(numba_cache_dir):
@@ -390,8 +456,8 @@ def load_model_if_needed():
                 if not os.access(model_path, os.R_OK):
                     raise PermissionError(f"无法读取模型文件: {model_path}，请检查文件权限。")
 
-                if torch.cuda.is_available():
-                    print(f"检测到 CUDA，将使用 GPU 加速并开启半精度(FP16)优化。")
+                if cuda_available:
+                    print(f"✅ 检测到兼容的CUDA环境，将使用 GPU 加速并开启半精度(FP16)优化。")
                     
                     # 设置 Tensor Core 优化
                     setup_tensor_core_optimization()
@@ -414,7 +480,8 @@ def load_model_if_needed():
                     allocated, reserved, total = get_gpu_memory_usage()
                     print(f"模型加载后显存使用: {allocated:.2f}GB / {total:.2f}GB ({allocated/total*100:.1f}%)")
                 else:
-                    print("未检测到 CUDA，将使用 CPU 运行。")
+                    print("🔄 使用 CPU 模式运行。")
+                    print("注意: CPU模式下推理速度会较慢，建议使用兼容的GPU。")
                     loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=model_path)
                     loaded_model = optimize_model_for_inference(loaded_model)
                 
@@ -432,13 +499,13 @@ def load_model_if_needed():
 
 def unload_model():
     """从内存/显存中卸载模型。"""
-    global asr_model, last_request_time
+    global asr_model, last_request_time, cuda_available
     with model_lock:
         if asr_model is not None:
-            print(f"模型闲置超过 {IDLE_TIMEOUT_MINUTES} 分钟，正在从显存中卸载...")
+            print(f"模型闲置超过 {IDLE_TIMEOUT_MINUTES} 分钟，正在从内存中卸载...")
             
             # 显示卸载前的显存使用
-            if torch.cuda.is_available():
+            if cuda_available:
                 allocated_before, _, total = get_gpu_memory_usage()
                 print(f"卸载前显存使用: {allocated_before:.2f}GB / {total:.2f}GB")
             
@@ -446,7 +513,7 @@ def unload_model():
             aggressive_memory_cleanup()
             
             # 显示卸载后的显存使用
-            if torch.cuda.is_available():
+            if cuda_available:
                 allocated_after, _, total = get_gpu_memory_usage()
                 print(f"卸载后显存使用: {allocated_after:.2f}GB / {total:.2f}GB")
                 print(f"释放显存: {allocated_before - allocated_after:.2f}GB")
@@ -603,7 +670,7 @@ def transcribe_audio():
 
         # --- 3. 音频切片 (Chunking) ---
         # 动态调整chunk大小基于显存使用情况
-        if torch.cuda.is_available():
+        if cuda_available:
             allocated, _, total = get_gpu_memory_usage()
             memory_usage_ratio = allocated / total if total > 0 else 0
             
@@ -615,7 +682,10 @@ def transcribe_audio():
             else:
                 CHUNK_DURATION_SECONDS = CHUNK_MINITE * 60
         else:
-            CHUNK_DURATION_SECONDS = CHUNK_MINITE * 60
+            # CPU模式下使用较小的chunk以避免内存不足
+            cpu_chunk_minutes = max(3, CHUNK_MINITE // 2)  # CPU模式减半chunk大小
+            print(f"[{unique_id}] CPU模式，调整chunk大小到 {cpu_chunk_minutes} 分钟")
+            CHUNK_DURATION_SECONDS = cpu_chunk_minutes * 60
             
         total_duration = get_audio_duration(target_wav_path)
         if total_duration == 0:
@@ -683,26 +753,34 @@ def transcribe_audio():
                 print(f"[{unique_id}] 显存使用过高，执行强制清理...")
                 aggressive_memory_cleanup()
             
-            # 显示当前显存使用
-            if torch.cuda.is_available():
+            # 显示当前显存/内存使用
+            if cuda_available:
                 allocated, _, total = get_gpu_memory_usage()
                 print(f"[{unique_id}] 处理切片 {i+1} 前显存使用: {allocated:.2f}GB / {total:.2f}GB")
+            else:
+                # 显示CPU内存使用
+                memory = psutil.virtual_memory()
+                print(f"[{unique_id}] 处理切片 {i+1} 前内存使用: {memory.used/1024**3:.2f}GB / {memory.total/1024**3:.2f}GB ({memory.percent:.1f}%)")
             
             # 对当前切片进行转录
             # 使用 with torch.cuda.amp.autocast() 在半精度下运行推理
             with torch.no_grad():  # 确保不计算梯度
-                if torch.cuda.is_available():
+                if cuda_available:
                     with torch.cuda.amp.autocast(dtype=torch.float16):
                         output = local_asr_model.transcribe([chunk_path], timestamps=True)
                 else:
+                    # CPU模式下直接转录
                     output = local_asr_model.transcribe([chunk_path], timestamps=True)
 
-            # 立即进行激进的显存清理
+            # 立即进行内存清理
             if AGGRESSIVE_MEMORY_CLEANUP:
                 aggressive_memory_cleanup()
             else:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                if cuda_available:
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
                 gc.collect()
             
             # 记录chunk边界用于后续合并
@@ -811,20 +889,26 @@ def transcribe_audio():
                 os.remove(f_path)
         print(f"[{unique_id}] 临时文件已清理。")
         
-        # --- 7. 强制清理显存，避免累积 ---
-        print(f"[{unique_id}] 执行最终显存清理...")
-        if torch.cuda.is_available():
+        # --- 7. 强制清理内存，避免累积 ---
+        print(f"[{unique_id}] 执行最终内存清理...")
+        if cuda_available:
             allocated_before, _, total = get_gpu_memory_usage()
             print(f"[{unique_id}] 清理前显存使用: {allocated_before:.2f}GB / {total:.2f}GB")
+        else:
+            memory_before = psutil.virtual_memory()
+            print(f"[{unique_id}] 清理前内存使用: {memory_before.used/1024**3:.2f}GB / {memory_before.total/1024**3:.2f}GB")
         
         aggressive_memory_cleanup()
         
-        if torch.cuda.is_available():
+        if cuda_available:
             allocated_after, _, total = get_gpu_memory_usage()
             print(f"[{unique_id}] 清理后显存使用: {allocated_after:.2f}GB / {total:.2f}GB")
             if allocated_before > 0:
                 print(f"[{unique_id}] 释放显存: {allocated_before - allocated_after:.2f}GB")
-        print(f"[{unique_id}] 显存清理完成。")
+        else:
+            memory_after = psutil.virtual_memory()
+            print(f"[{unique_id}] 清理后内存使用: {memory_after.used/1024**3:.2f}GB / {memory_after.total/1024**3:.2f}GB")
+        print(f"[{unique_id}] 内存清理完成。")
 
 
 def segments_to_vtt(segments: list) -> str:
@@ -903,19 +987,26 @@ if __name__ == '__main__':
     print(f"强制清理阈值: {FORCE_CLEANUP_THRESHOLD*100:.0f}%")
     print(f"最大chunk内存: {MAX_CHUNK_MEMORY_MB}MB")
     print(f"默认chunk时长: {CHUNK_MINITE} 分钟")
-    if torch.cuda.is_available():
+    # 初始化CUDA兼容性检查
+    print("正在检查CUDA兼容性...")
+    cuda_available = check_cuda_compatibility()
+    
+    if cuda_available:
         _, _, total_memory = get_gpu_memory_usage()
         print(f"GPU总显存: {total_memory:.1f}GB")
+    else:
+        memory = psutil.virtual_memory()
+        print(f"系统内存: {memory.total/1024**3:.1f}GB")
     print("=" * 25)
     print("")
     print("=== Tensor Core 配置 ===")
     print(f"Tensor Core: {'启用' if ENABLE_TENSOR_CORE else '禁用'}")
     print(f"cuDNN Benchmark: {'启用' if ENABLE_CUDNN_BENCHMARK else '禁用'}")
     print(f"精度模式: {TENSOR_CORE_PRECISION}")
-    if torch.cuda.is_available():
+    if cuda_available:
         print(f"GPU支持: {get_tensor_core_info()}")
     else:
-        print("GPU支持: N/A - CUDA不可用")
+        print("GPU支持: N/A - CUDA不可用或不兼容")
     print("=" * 25)
     print("")
     print("=== 句子完整性优化 ===")

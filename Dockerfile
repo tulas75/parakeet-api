@@ -1,5 +1,5 @@
 # 多阶段构建：第一阶段用于编译依赖
-FROM nvidia/cuda:12.3.2-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
 
 # 设置环境变量，避免交互式安装
 ENV DEBIAN_FRONTEND=noninteractive
@@ -33,7 +33,7 @@ RUN pip install --no-cache-dir \
     && pip install --no-cache-dir -r /tmp/requirements.txt
 
 # 第二阶段：运行时镜像
-FROM nvidia/cuda:12.3.2-runtime-ubuntu22.04
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
 
 # 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive

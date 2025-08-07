@@ -1,0 +1,52 @@
+version: '3.8'
+services:
+  parakeet-api-docker:
+    container_name: parakeet-api-docker
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5092:5092"
+    volumes:
+      - ./models:/app/models:ro
+      - ./temp_uploads:/app/temp_uploads
+    environment:
+      # 基础配置
+      - CHUNK_MINITE=8  # CMP 40HX 8GB显存优化
+      - IDLE_TIMEOUT_MINUTES=15  # 更快释放显存
+      - ENABLE_LAZY_LOAD=true
+      - API_KEY=
+      - PUID=1000
+      - PGID=1000
+      
+      # 显存优化配置 (针对8GB显存)
+      - AGGRESSIVE_MEMORY_CLEANUP=true
+      - ENABLE_GRADIENT_CHECKPOINTING=true
+      - FORCE_CLEANUP_THRESHOLD=0.7  # 降低阈值，更早清理
+      - MAX_CHUNK_MEMORY_MB=1200     # 减少内存使用
+      
+      # Tensor Core 优化配置 (CMP 40HX 支持)
+      - ENABLE_TENSOR_CORE=true
+      - ENABLE_CUDNN_BENCHMARK=true
+      - TENSOR_CORE_PRECISION=high   # 平衡性能和精度
+      
+      # 句子完整性优化配置
+      - ENABLE_OVERLAP_CHUNKING=true
+      - CHUNK_OVERLAP_SECONDS=20     # 减少重叠时间节省显存
+      - SENTENCE_BOUNDARY_THRESHOLD=0.5
+      
+      # CUDA兼容性设置
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 16G  # 限制容器内存使用
