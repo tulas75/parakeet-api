@@ -235,11 +235,18 @@ jobs:
 
       - name: 🧪 Test image startup
         run: |
-          # 设置镜像名称 - 使用latest标签或根据分支/事件类型确定标签
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          # 设置镜像名称 - 根据构建的实际标签来确定测试用的镜像
+          # 优先使用latest标签，如果不存在则使用其他可用标签
+          if docker image inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" > /dev/null 2>&1; then
             IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            # 对于push事件，使用commit SHA标签
+            IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:commit-${{ github.sha }}"
           else
-            IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+            # 对于PR等其他事件，使用分支名
+            IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.head_ref || github.ref_name }}"
           fi
           
           echo "测试镜像: $IMAGE_TAG"
@@ -257,23 +264,61 @@ jobs:
             -e IDLE_TIMEOUT_MINUTES=1 \
             $IMAGE_TAG
           
-          # 等待容器启动
+          # 等待容器启动并检查健康状态
           echo "等待容器启动..."
-          sleep 30
           
-          # 检查容器状态
-          if ! docker ps | grep test-container; then
-            echo "❌ 容器启动失败"
+          # 等待最多2分钟，检查容器健康状态
+          max_attempts=24  # 24 * 5秒 = 2分钟
+          attempt=0
+          
+          while [ $attempt -lt $max_attempts ]; do
+            attempt=$((attempt + 1))
+            
+            # 检查容器是否还在运行
+            if ! docker ps | grep test-container > /dev/null; then
+              echo "❌ 容器已停止运行"
+              docker logs test-container
+              exit 1
+            fi
+            
+            # 检查Docker健康状态
+            health_status=$(docker inspect --format='{{.State.Health.Status}}' test-container 2>/dev/null || echo "none")
+            echo "尝试 $attempt/$max_attempts - 容器健康状态: $health_status"
+            
+            if [ "$health_status" = "healthy" ]; then
+              echo "✅ 容器健康检查通过"
+              break
+            elif [ "$health_status" = "unhealthy" ]; then
+              echo "❌ 容器健康检查失败"
+              docker logs test-container
+              exit 1
+            fi
+            
+            # 如果健康检查还没准备好，也尝试直接访问端点
+            if curl -f -s --max-time 5 http://localhost:5092/health/simple > /dev/null 2>&1; then
+              echo "✅ 健康检查端点直接访问成功"
+              break
+            fi
+            
+            sleep 5
+          done
+          
+          # 最终检查
+          if [ $attempt -ge $max_attempts ]; then
+            echo "❌ 等待超时，容器未能在2分钟内启动完成"
+            echo "最终容器状态:"
+            docker ps -a | grep test-container
+            echo "容器日志:"
             docker logs test-container
             exit 1
           fi
           
-          # 测试健康检查端点
-          echo "测试健康检查端点..."
-          if curl -f http://localhost:5092/health/simple; then
-            echo "✅ 健康检查端点响应正常"
+          # 额外验证健康检查端点
+          echo "验证健康检查端点响应..."
+          if curl -f -v http://localhost:5092/health/simple; then
+            echo "✅ 健康检查端点最终验证成功"
           else
-            echo "❌ 健康检查端点响应异常"
+            echo "❌ 健康检查端点最终验证失败"
             docker logs test-container
             exit 1
           fi

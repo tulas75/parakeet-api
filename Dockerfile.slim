@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     ffmpeg \
     gosu \
+    curl \
+    netcat-openbsd \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/* \
@@ -44,8 +46,10 @@ RUN pip install --no-cache-dir --no-compile \
     && find /usr/local -name "*.pyc" -delete \
     && find /usr/local -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
-# 复制应用代码
+# 复制应用代码和健康检查脚本
 COPY --chown=appuser:appuser app.py .
+COPY healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/healthcheck.sh
 
 # 创建必要的目录
 RUN mkdir -p /app/models /app/temp_uploads \
@@ -91,9 +95,9 @@ exec gosu appuser python3 app.py\n\
 # 暴露端口
 EXPOSE 5092
 
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5092/', timeout=10)" || exit 1
+# 健康检查 - 使用专门的健康检查脚本
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD /usr/local/bin/healthcheck.sh
 
 # 启动命令
 CMD ["/usr/local/bin/start.sh"] 
