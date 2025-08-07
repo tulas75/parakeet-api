@@ -33,19 +33,338 @@ os.environ['HF_ENDPOINT']='https://hf-mirror.com'
 os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = 'true'
 # PATH for ffmpeg is handled by the Docker image's system PATH
 
-import nemo.collections.asr as nemo_asr
+import nemo.collections.asr as nemo_asr  # type: ignore
 import torch
+import torch.nn as nn
+import torch.backends.cudnn as cudnn
 import gc
+import psutil
 
 # --- 全局设置与模型状态 ---
 asr_model = None
 last_request_time = None
 model_lock = threading.Lock()
 
+# 显存优化配置
+AGGRESSIVE_MEMORY_CLEANUP = os.environ.get('AGGRESSIVE_MEMORY_CLEANUP', 'true').lower() in ['true', '1', 't']
+ENABLE_GRADIENT_CHECKPOINTING = os.environ.get('ENABLE_GRADIENT_CHECKPOINTING', 'true').lower() in ['true', '1', 't']
+MAX_CHUNK_MEMORY_MB = int(os.environ.get('MAX_CHUNK_MEMORY_MB', '1500'))
+FORCE_CLEANUP_THRESHOLD = float(os.environ.get('FORCE_CLEANUP_THRESHOLD', '0.8'))
+
+# Tensor Core 优化配置
+ENABLE_TENSOR_CORE = os.environ.get('ENABLE_TENSOR_CORE', 'true').lower() in ['true', '1', 't']
+ENABLE_CUDNN_BENCHMARK = os.environ.get('ENABLE_CUDNN_BENCHMARK', 'true').lower() in ['true', '1', 't']
+TENSOR_CORE_PRECISION = os.environ.get('TENSOR_CORE_PRECISION', 'highest')  # highest, high, medium
+
+# 句子完整性优化配置
+ENABLE_OVERLAP_CHUNKING = os.environ.get('ENABLE_OVERLAP_CHUNKING', 'true').lower() in ['true', '1', 't']
+CHUNK_OVERLAP_SECONDS = float(os.environ.get('CHUNK_OVERLAP_SECONDS', '30'))  # 重叠时长
+SENTENCE_BOUNDARY_THRESHOLD = float(os.environ.get('SENTENCE_BOUNDARY_THRESHOLD', '0.5'))  # 句子边界检测阈值
+
 
 # 确保临时上传目录存在
 if not os.path.exists('/app/temp_uploads'):
     os.makedirs('/app/temp_uploads')
+
+def setup_tensor_core_optimization():
+    """配置Tensor Core优化设置"""
+    if not torch.cuda.is_available():
+        return
+    
+    print("正在配置 Tensor Core 优化...")
+    
+    # 启用 cuDNN benchmark 模式
+    if ENABLE_CUDNN_BENCHMARK:
+        cudnn.benchmark = True
+        cudnn.deterministic = False  # 为了性能，允许非确定性
+        print("✅ cuDNN benchmark 已启用")
+    else:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+        print("❌ cuDNN benchmark 已禁用（确定性模式）")
+    
+    # 启用 cuDNN 允许 TensorCore
+    if ENABLE_TENSOR_CORE:
+        cudnn.allow_tf32 = True  # 允许TF32（A100等支持）
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("✅ Tensor Core (TF32) 已启用")
+    else:
+        cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        print("❌ Tensor Core 已禁用")
+    
+    # 设置 Tensor Core 精度策略
+    if TENSOR_CORE_PRECISION == 'highest':
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+        print("✅ 设置为最高精度模式")
+    elif TENSOR_CORE_PRECISION == 'high':
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+        print("✅ 设置为高精度模式")
+    else:  # medium
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+        print("✅ 设置为中等精度模式")
+    
+    # 设置内存分配策略以优化 Tensor Core 使用
+    try:
+        torch.cuda.set_per_process_memory_fraction(0.95)  # 使用95%的显存
+        print("✅ GPU 内存分配策略已优化")
+    except Exception as e:
+        print(f"⚠️ 无法设置GPU内存分配: {e}")
+
+def get_tensor_core_info():
+    """获取 Tensor Core 支持信息"""
+    if not torch.cuda.is_available():
+        return "N/A - CUDA不可用"
+    
+    device = torch.cuda.get_device_properties(0)
+    major, minor = device.major, device.minor
+    
+    # 检测 Tensor Core 支持
+    if major >= 7:  # V100, T4, RTX 20/30/40系列等
+        if major == 7:
+            return f"✅ Tensor Core 1.0 (计算能力 {major}.{minor})"
+        elif major == 8:
+            if minor >= 0:
+                return f"✅ Tensor Core 2.0 + TF32 (计算能力 {major}.{minor})"
+            else:
+                return f"✅ Tensor Core 2.0 (计算能力 {major}.{minor})"
+        elif major >= 9:
+            return f"✅ Tensor Core 3.0+ (计算能力 {major}.{minor})"
+    elif major >= 6:  # P100等
+        return f"⚠️ 有限Tensor Core支持 (计算能力 {major}.{minor})"
+    else:
+        return f"❌ 不支持Tensor Core (计算能力 {major}.{minor})"
+    
+    return f"未知 (计算能力 {major}.{minor})"
+
+def optimize_tensor_operations():
+    """优化张量操作以更好地利用 Tensor Core"""
+    if not torch.cuda.is_available():
+        return
+    
+    # 设置优化的 CUDA 流
+    torch.cuda.set_sync_debug_mode(0)  # 禁用同步调试以提升性能
+    
+    # 预热GPU，确保Tensor Core正确激活
+    if torch.cuda.is_available():
+        try:
+            # 创建一些对齐到8/16倍数的矩阵进行预热
+            device = torch.cuda.current_device()
+            dummy_a = torch.randn(128, 128, device=device, dtype=torch.float16)
+            dummy_b = torch.randn(128, 128, device=device, dtype=torch.float16)
+            
+            # 执行矩阵乘法预热Tensor Core
+            with torch.cuda.amp.autocast():
+                _ = torch.matmul(dummy_a, dummy_b)
+            
+            torch.cuda.synchronize()
+            del dummy_a, dummy_b
+            torch.cuda.empty_cache()
+            print("✅ Tensor Core 预热完成")
+        except Exception as e:
+            print(f"⚠️ Tensor Core 预热失败: {e}")
+
+def detect_sentence_boundaries(text: str) -> list:
+    """检测句子边界，返回句子结束位置列表"""
+    import re
+    
+    # 中英文句号、问号、感叹号等
+    sentence_endings = re.finditer(r'[.!?。！？]+[\s]*', text)
+    boundaries = [match.end() for match in sentence_endings]
+    return boundaries
+
+def find_best_split_point(segments: list, target_time: float, tolerance: float = 2.0) -> int:
+    """在目标时间附近找到最佳的句子分割点"""
+    if not segments:
+        return 0
+    
+    best_index = 0
+    min_distance = float('inf')
+    
+    # 寻找最接近目标时间的句子结束点
+    for i, segment in enumerate(segments):
+        segment_end = segment.get('end', 0)
+        distance = abs(segment_end - target_time)
+        
+        # 检查是否是句子结束（包含标点符号）
+        text = segment.get('segment', '').strip()
+        if text and (text.endswith('.') or text.endswith('。') or 
+                     text.endswith('!') or text.endswith('！') or
+                     text.endswith('?') or text.endswith('？')):
+            # 句子结束点，权重更高
+            distance *= 0.5
+        
+        if distance < min_distance and distance <= tolerance:
+            min_distance = distance
+            best_index = i + 1  # 返回下一个段落的索引
+    
+    return min(best_index, len(segments))
+
+def merge_overlapping_segments(all_segments: list, chunk_boundaries: list, overlap_seconds: float) -> list:
+    """合并重叠区域的segments，去除重复内容"""
+    if not ENABLE_OVERLAP_CHUNKING or len(chunk_boundaries) <= 1:
+        return all_segments
+    
+    merged_segments = []
+    current_chunk_segments = []
+    current_chunk_index = 0
+    
+    print(f"开始合并 {len(all_segments)} 个segments，chunk边界: {chunk_boundaries}")
+    
+    for segment in all_segments:
+        segment_start = segment['start']
+        segment_end = segment['end']
+        
+        # 确定当前segment属于哪个chunk
+        while (current_chunk_index < len(chunk_boundaries) - 1 and 
+               segment_start >= chunk_boundaries[current_chunk_index + 1] - overlap_seconds):
+            # 处理前一个chunk的segments
+            if current_chunk_segments:
+                # 处理重叠区域
+                overlap_start = chunk_boundaries[current_chunk_index + 1] - overlap_seconds
+                processed_segments = process_chunk_segments(
+                    current_chunk_segments, overlap_start, overlap_seconds
+                )
+                merged_segments.extend(processed_segments)
+                current_chunk_segments = []
+            
+            current_chunk_index += 1
+        
+        current_chunk_segments.append(segment)
+    
+    # 处理最后一个chunk
+    if current_chunk_segments:
+        merged_segments.extend(current_chunk_segments)
+    
+    print(f"合并完成，最终 {len(merged_segments)} 个segments")
+    return merged_segments
+
+def process_chunk_segments(segments: list, overlap_start: float, overlap_seconds: float) -> list:
+    """处理单个chunk的segments，处理重叠区域"""
+    if not segments:
+        return []
+    
+    processed = []
+    overlap_end = overlap_start + overlap_seconds
+    
+    for segment in segments:
+        segment_start = segment['start']
+        segment_end = segment['end']
+        
+        # 如果segment完全在重叠区域之前，直接添加
+        if segment_end <= overlap_start:
+            processed.append(segment)
+        # 如果segment跨越重叠区域开始，需要检查是否截断
+        elif segment_start < overlap_start < segment_end:
+            # 检查是否在句子中间截断
+            text = segment.get('segment', '').strip()
+            if text and not any(punct in text for punct in ['.', '。', '!', '！', '?', '？']):
+                # 在句子中间，保留完整segment
+                processed.append(segment)
+            else:
+                # 可以安全截断的句子结束
+                processed.append(segment)
+        
+    return processed
+
+def create_overlap_chunks(total_duration: float, chunk_duration: float, overlap_seconds: float) -> list:
+    """创建带重叠的chunk时间段"""
+    chunks = []
+    current_start = 0.0
+    
+    while current_start < total_duration:
+        chunk_end = min(current_start + chunk_duration, total_duration)
+        
+        chunk_info = {
+            'start': current_start,
+            'end': chunk_end,
+            'duration': chunk_end - current_start
+        }
+        chunks.append(chunk_info)
+        
+        # 下一个chunk的开始时间（考虑重叠）
+        if chunk_end >= total_duration:
+            break
+            
+        current_start = chunk_end - overlap_seconds
+        
+    print(f"创建了 {len(chunks)} 个重叠chunks:")
+    for i, chunk in enumerate(chunks):
+        print(f"  Chunk {i}: {chunk['start']:.1f}s - {chunk['end']:.1f}s (时长: {chunk['duration']:.1f}s)")
+    
+    return chunks
+
+def get_gpu_memory_usage():
+    """获取GPU显存使用情况"""
+    if not torch.cuda.is_available():
+        return 0, 0, 0
+    
+    allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+    reserved = torch.cuda.memory_reserved() / 1024**3   # GB
+    total = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+    return allocated, reserved, total
+
+def aggressive_memory_cleanup():
+    """激进的显存清理函数"""
+    if torch.cuda.is_available():
+        # 清空CUDA缓存
+        torch.cuda.empty_cache()
+        # 同步所有CUDA操作
+        torch.cuda.synchronize()
+        # 重置峰值内存统计
+        torch.cuda.reset_peak_memory_stats()
+    
+    # 强制Python垃圾回收
+    for _ in range(3):
+        gc.collect()
+    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+def should_force_cleanup():
+    """检查是否需要强制清理显存"""
+    if not torch.cuda.is_available():
+        return False
+    
+    allocated, reserved, total = get_gpu_memory_usage()
+    usage_ratio = allocated / total if total > 0 else 0
+    return usage_ratio > FORCE_CLEANUP_THRESHOLD
+
+def optimize_model_for_inference(model):
+    """优化模型以减少推理时的显存占用"""
+    if model is None:
+        return model
+    
+    # 设置为评估模式
+    model.eval()
+    
+    # 启用梯度检查点（如果支持）
+    if ENABLE_GRADIENT_CHECKPOINTING and hasattr(model, 'encoder'):
+        try:
+            if hasattr(model.encoder, 'use_gradient_checkpointing'):
+                model.encoder.use_gradient_checkpointing = True
+            elif hasattr(model.encoder, 'gradient_checkpointing'):
+                model.encoder.gradient_checkpointing = True
+        except Exception as e:
+            print(f"无法启用梯度检查点: {e}")
+    
+    # 禁用自动求导（推理时不需要梯度）
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    return model
+
+def create_streaming_config():
+    """创建流式处理配置以减少显存占用"""
+    return {
+        'batch_size': 1,  # 单批处理减少显存占用
+        'num_workers': 0,  # 避免多进程带来的额外内存开销
+        'pin_memory': False,  # 不使用锁页内存以节省系统内存
+        'drop_last': False,
+        'persistent_workers': False  # 不保持worker进程
+    }
 
 def load_model_if_needed():
     """按需加载模型，如果模型未加载，则进行加载。"""
@@ -73,13 +392,31 @@ def load_model_if_needed():
 
                 if torch.cuda.is_available():
                     print(f"检测到 CUDA，将使用 GPU 加速并开启半精度(FP16)优化。")
+                    
+                    # 设置 Tensor Core 优化
+                    setup_tensor_core_optimization()
+                    optimize_tensor_operations()
+                    
+                    # 显示 GPU 和 Tensor Core 信息
+                    device_info = torch.cuda.get_device_properties(0)
+                    print(f"GPU: {device_info.name}")
+                    print(f"Tensor Core 支持: {get_tensor_core_info()}")
+                    
                     # 先在CPU上加载模型，然后转移到GPU并启用FP16
                     loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=model_path, map_location=torch.device('cpu'))
                     loaded_model = loaded_model.cuda()
                     loaded_model = loaded_model.half()
+                    
+                    # 应用推理优化
+                    loaded_model = optimize_model_for_inference(loaded_model)
+                    
+                    # 显示显存使用情况
+                    allocated, reserved, total = get_gpu_memory_usage()
+                    print(f"模型加载后显存使用: {allocated:.2f}GB / {total:.2f}GB ({allocated/total*100:.1f}%)")
                 else:
                     print("未检测到 CUDA，将使用 CPU 运行。")
                     loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=model_path)
+                    loaded_model = optimize_model_for_inference(loaded_model)
                 
                 asr_model = loaded_model
                 print("✅ NeMo ASR 模型加载成功！")
@@ -99,10 +436,21 @@ def unload_model():
     with model_lock:
         if asr_model is not None:
             print(f"模型闲置超过 {IDLE_TIMEOUT_MINUTES} 分钟，正在从显存中卸载...")
-            asr_model = None
+            
+            # 显示卸载前的显存使用
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
+                allocated_before, _, total = get_gpu_memory_usage()
+                print(f"卸载前显存使用: {allocated_before:.2f}GB / {total:.2f}GB")
+            
+            asr_model = None
+            aggressive_memory_cleanup()
+            
+            # 显示卸载后的显存使用
+            if torch.cuda.is_available():
+                allocated_after, _, total = get_gpu_memory_usage()
+                print(f"卸载后显存使用: {allocated_after:.2f}GB / {total:.2f}GB")
+                print(f"释放显存: {allocated_before - allocated_after:.2f}GB")
+            
             last_request_time = None # 重置计时器，防止重复卸载
             print("✅ 模型已成功卸载。")
 
@@ -254,7 +602,21 @@ def transcribe_audio():
         temp_files_to_clean.append(target_wav_path)
 
         # --- 3. 音频切片 (Chunking) ---
-        CHUNK_DURATION_SECONDS = CHUNK_MINITE * 60  
+        # 动态调整chunk大小基于显存使用情况
+        if torch.cuda.is_available():
+            allocated, _, total = get_gpu_memory_usage()
+            memory_usage_ratio = allocated / total if total > 0 else 0
+            
+            if memory_usage_ratio > 0.6:  # 如果显存使用超过60%
+                # 减少chunk大小以降低显存压力
+                adjusted_chunk_minutes = max(3, CHUNK_MINITE - 2)
+                print(f"[{unique_id}] 显存使用较高({memory_usage_ratio*100:.1f}%)，调整chunk大小从 {CHUNK_MINITE} 分钟到 {adjusted_chunk_minutes} 分钟")
+                CHUNK_DURATION_SECONDS = adjusted_chunk_minutes * 60
+            else:
+                CHUNK_DURATION_SECONDS = CHUNK_MINITE * 60
+        else:
+            CHUNK_DURATION_SECONDS = CHUNK_MINITE * 60
+            
         total_duration = get_audio_duration(target_wav_path)
         if total_duration == 0:
             return jsonify({"error": "无法处理时长为0的音频"}), 400
@@ -263,70 +625,121 @@ def transcribe_audio():
         if total_duration <= CHUNK_DURATION_SECONDS:
             print(f"[{unique_id}] 文件总时长: {total_duration:.2f}s. 小于切片阈值({CHUNK_DURATION_SECONDS}s)，无需切片。")
             chunk_paths = [target_wav_path]
+            chunk_info_list = [{'start': 0, 'end': total_duration, 'duration': total_duration}]
             num_chunks = 1
         else:
-            num_chunks = math.ceil(total_duration / CHUNK_DURATION_SECONDS)
+            # 使用重叠分割策略
+            if ENABLE_OVERLAP_CHUNKING:
+                print(f"[{unique_id}] 启用重叠分割模式，重叠时长: {CHUNK_OVERLAP_SECONDS}s")
+                chunk_info_list = create_overlap_chunks(total_duration, CHUNK_DURATION_SECONDS, CHUNK_OVERLAP_SECONDS)
+            else:
+                # 传统硬分割
+                num_chunks = math.ceil(total_duration / CHUNK_DURATION_SECONDS)
+                chunk_info_list = []
+                for i in range(num_chunks):
+                    start_time = i * CHUNK_DURATION_SECONDS
+                    end_time = min(start_time + CHUNK_DURATION_SECONDS, total_duration)
+                    chunk_info_list.append({
+                        'start': start_time,
+                        'end': end_time, 
+                        'duration': end_time - start_time
+                    })
+            
             chunk_paths = []
+            num_chunks = len(chunk_info_list)
             print(f"[{unique_id}] 文件总时长: {total_duration:.2f}s. 将切分为 {num_chunks} 个片段。")
             
-            for i in range(num_chunks):
-                start_time = i * CHUNK_DURATION_SECONDS
+            for i, chunk_info in enumerate(chunk_info_list):
                 chunk_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_chunk_{i}.wav")
                 chunk_paths.append(chunk_path)
                 temp_files_to_clean.append(chunk_path)
                 
-                print(f"[{unique_id}] 正在创建切片 {i+1}/{num_chunks}...")
+                start_time = chunk_info['start']
+                duration = chunk_info['duration']
+                
+                print(f"[{unique_id}] 正在创建切片 {i+1}/{num_chunks} ({start_time:.1f}s - {chunk_info['end']:.1f}s)...")
                 chunk_command = [
                     'ffmpeg', '-y', '-i', target_wav_path,
                     '-ss', str(start_time),
-                    '-t', str(CHUNK_DURATION_SECONDS),
+                    '-t', str(duration),
                     '-c', 'copy',
                     chunk_path
                 ]
-                subprocess.run(chunk_command, capture_output=True, text=True)
+                result = subprocess.run(chunk_command, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"[{unique_id}] ⚠️ 创建切片 {i+1} 时出现警告: {result.stderr}")
+                    # 继续处理，不中断
             
         # --- 4. 循环转录并合并结果 ---
         all_segments = []
         all_words = []
-        cumulative_time_offset = 0.0
+        chunk_boundaries = []
 
-        for i, chunk_path in enumerate(chunk_paths):
+        for i, (chunk_path, chunk_info) in enumerate(zip(chunk_paths, chunk_info_list)):
             print(f"[{unique_id}] 正在转录切片 {i+1}/{num_chunks}...")
+            
+            # 检查显存使用情况，如果过高则强制清理
+            if should_force_cleanup():
+                print(f"[{unique_id}] 显存使用过高，执行强制清理...")
+                aggressive_memory_cleanup()
+            
+            # 显示当前显存使用
+            if torch.cuda.is_available():
+                allocated, _, total = get_gpu_memory_usage()
+                print(f"[{unique_id}] 处理切片 {i+1} 前显存使用: {allocated:.2f}GB / {total:.2f}GB")
             
             # 对当前切片进行转录
             # 使用 with torch.cuda.amp.autocast() 在半精度下运行推理
-            if torch.cuda.is_available():
-                with torch.cuda.amp.autocast():
+            with torch.no_grad():  # 确保不计算梯度
+                if torch.cuda.is_available():
+                    with torch.cuda.amp.autocast(dtype=torch.float16):
+                        output = local_asr_model.transcribe([chunk_path], timestamps=True)
+                else:
                     output = local_asr_model.transcribe([chunk_path], timestamps=True)
-            else:
-                 output = local_asr_model.transcribe([chunk_path], timestamps=True)
 
-            # 立即清理显存，避免累积
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
+            # 立即进行激进的显存清理
+            if AGGRESSIVE_MEMORY_CLEANUP:
+                aggressive_memory_cleanup()
+            else:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+            
+            # 记录chunk边界用于后续合并
+            chunk_start_offset = chunk_info['start']
+            chunk_boundaries.append(chunk_start_offset)
             
             if output and output[0].timestamp:
-                # 修正并收集 segment 时间戳
+                # 修正并收集 segment 时间戳（使用chunk在原音频中的真实起始时间）
                 if 'segment' in output[0].timestamp:
                     for seg in output[0].timestamp['segment']:
-                        seg['start'] += cumulative_time_offset
-                        seg['end'] += cumulative_time_offset
+                        seg['start'] += chunk_start_offset
+                        seg['end'] += chunk_start_offset
                         all_segments.append(seg)
                 
                 # 修正并收集 word 时间戳
                 if 'word' in output[0].timestamp:
                      for word in output[0].timestamp['word']:
-                        word['start'] += cumulative_time_offset
-                        word['end'] += cumulative_time_offset
+                        word['start'] += chunk_start_offset
+                        word['end'] += chunk_start_offset
                         all_words.append(word)
-
-            # 更新下一个切片的时间偏移量
-            # 使用实际切片时长来更新，更精确
-            chunk_actual_duration = get_audio_duration(chunk_path)
-            cumulative_time_offset += chunk_actual_duration
+            
+            # 立即删除已处理的chunk文件以节省磁盘空间和内存
+            if num_chunks > 1 and os.path.exists(chunk_path):
+                try:
+                    os.remove(chunk_path)
+                    temp_files_to_clean.remove(chunk_path)
+                    print(f"[{unique_id}] 已删除处理完成的切片文件: chunk_{i}")
+                except Exception as e:
+                    print(f"[{unique_id}] 删除切片文件时出错: {e}")
 
         print(f"[{unique_id}] 所有切片转录完成，正在合并结果。")
+        
+        # --- 4.5. 处理重叠区域并合并segments ---
+        if ENABLE_OVERLAP_CHUNKING and len(chunk_boundaries) > 1:
+            print(f"[{unique_id}] 处理重叠区域，去除重复内容...")
+            all_segments = merge_overlapping_segments(all_segments, chunk_boundaries, CHUNK_OVERLAP_SECONDS)
+            print(f"[{unique_id}] 重叠处理完成，最终segments数量: {len(all_segments)}")
 
         # --- 5. 格式化最终输出 ---
         if not all_segments:
@@ -399,10 +812,19 @@ def transcribe_audio():
         print(f"[{unique_id}] 临时文件已清理。")
         
         # --- 7. 强制清理显存，避免累积 ---
+        print(f"[{unique_id}] 执行最终显存清理...")
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-        print(f"[{unique_id}] 显存已清理。")
+            allocated_before, _, total = get_gpu_memory_usage()
+            print(f"[{unique_id}] 清理前显存使用: {allocated_before:.2f}GB / {total:.2f}GB")
+        
+        aggressive_memory_cleanup()
+        
+        if torch.cuda.is_available():
+            allocated_after, _, total = get_gpu_memory_usage()
+            print(f"[{unique_id}] 清理后显存使用: {allocated_after:.2f}GB / {total:.2f}GB")
+            if allocated_before > 0:
+                print(f"[{unique_id}] 释放显存: {allocated_before - allocated_after:.2f}GB")
+        print(f"[{unique_id}] 显存清理完成。")
 
 
 def segments_to_vtt(segments: list) -> str:
@@ -474,4 +896,32 @@ if __name__ == '__main__':
     print(f"🚀 服务器启动中...")
     print(f"API 端点: POST http://{host}:{port}/v1/audio/transcriptions")
     print(f"服务将使用 {threads} 个线程运行。")
+    print("")
+    print("=== 显存优化配置 ===")
+    print(f"激进显存清理: {'启用' if AGGRESSIVE_MEMORY_CLEANUP else '禁用'}")
+    print(f"梯度检查点: {'启用' if ENABLE_GRADIENT_CHECKPOINTING else '禁用'}")
+    print(f"强制清理阈值: {FORCE_CLEANUP_THRESHOLD*100:.0f}%")
+    print(f"最大chunk内存: {MAX_CHUNK_MEMORY_MB}MB")
+    print(f"默认chunk时长: {CHUNK_MINITE} 分钟")
+    if torch.cuda.is_available():
+        _, _, total_memory = get_gpu_memory_usage()
+        print(f"GPU总显存: {total_memory:.1f}GB")
+    print("=" * 25)
+    print("")
+    print("=== Tensor Core 配置 ===")
+    print(f"Tensor Core: {'启用' if ENABLE_TENSOR_CORE else '禁用'}")
+    print(f"cuDNN Benchmark: {'启用' if ENABLE_CUDNN_BENCHMARK else '禁用'}")
+    print(f"精度模式: {TENSOR_CORE_PRECISION}")
+    if torch.cuda.is_available():
+        print(f"GPU支持: {get_tensor_core_info()}")
+    else:
+        print("GPU支持: N/A - CUDA不可用")
+    print("=" * 25)
+    print("")
+    print("=== 句子完整性优化 ===")
+    print(f"重叠分割: {'启用' if ENABLE_OVERLAP_CHUNKING else '禁用'}")
+    if ENABLE_OVERLAP_CHUNKING:
+        print(f"重叠时长: {CHUNK_OVERLAP_SECONDS}s")
+        print(f"边界阈值: {SENTENCE_BOUNDARY_THRESHOLD}")
+    print("=" * 25)
     serve(app, host=host, port=port, threads=threads)

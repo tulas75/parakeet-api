@@ -14,20 +14,34 @@ services:
       - ./models:/app/models:ro
       - ./temp_uploads:/app/temp_uploads
     environment:
+      # 基础配置
       - CHUNK_MINITE=10
       - IDLE_TIMEOUT_MINUTES=30
       - ENABLE_LAZY_LOAD=true
       - API_KEY=
       - PUID=1000
       - PGID=1000
-    # 健康检查
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5092/', timeout=10)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    # 重启策略
+      
+      # 显存优化配置
+      - AGGRESSIVE_MEMORY_CLEANUP=true
+      - ENABLE_GRADIENT_CHECKPOINTING=true
+      - FORCE_CLEANUP_THRESHOLD=0.8
+      - MAX_CHUNK_MEMORY_MB=1500
+      
+      # Tensor Core 优化配置
+      - ENABLE_TENSOR_CORE=true
+      - ENABLE_CUDNN_BENCHMARK=true
+      - TENSOR_CORE_PRECISION=highest
+      
+      # 句子完整性优化配置
+      - ENABLE_OVERLAP_CHUNKING=true
+      - CHUNK_OVERLAP_SECONDS=30
+      - SENTENCE_BOUNDARY_THRESHOLD=0.5
+      
+      # 根据GPU配置调整以下参数:
+      # 4-6GB显存: CHUNK_MINITE=5, FORCE_CLEANUP_THRESHOLD=0.6
+      # 8-12GB显存: CHUNK_MINITE=10, FORCE_CLEANUP_THRESHOLD=0.8 (默认)
+      # 16GB+显存: CHUNK_MINITE=15, FORCE_CLEANUP_THRESHOLD=0.9
     restart: unless-stopped
     deploy:
       resources:
