@@ -51,6 +51,8 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     ffmpeg \
     sox \
+    curl \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
     && apt-get autoremove -y
@@ -62,8 +64,10 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # 设置工作目录
 WORKDIR /app
 
-# 复制应用代码
+# 复制应用代码和健康检查脚本
 COPY --chown=appuser:appuser . .
+COPY healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/healthcheck.sh
 
 # 创建必要的目录
 RUN mkdir -p /app/models /app/temp_uploads /tmp/numba_cache \
@@ -99,19 +103,38 @@ fi\n\
 if [ "$PGID" != "$(id -g appuser)" ]; then\n\
     echo "调整appuser GID从 $(id -g appuser) 到 $PGID"\n\
     groupmod -g $PGID appuser 2>/dev/null || true\n\
+    usermod -g $PGID appuser 2>/dev/null || true\n\
 fi\n\
 \n\
-# 确保目录权限正确\n\
-chown -R appuser:appuser /app/temp_uploads\n\
+# 创建并设置用户主目录权限\n\
+mkdir -p /home/appuser\n\
+chown -R appuser:$PGID /home/appuser\n\
+chmod 755 /home/appuser\n\
+\n\
+# 创建配置目录\n\
+mkdir -p /home/appuser/.config/matplotlib\n\
+mkdir -p /home/appuser/.lhotse/tools\n\
+chown -R appuser:$PGID /home/appuser/.config\n\
+chown -R appuser:$PGID /home/appuser/.lhotse\n\
+chmod -R 755 /home/appuser/.config\n\
+chmod -R 755 /home/appuser/.lhotse\n\
+\n\
+# 确保应用目录权限正确\n\
+chown -R appuser:$PGID /app/temp_uploads\n\
 \n\
 # 确保numba缓存目录权限正确\n\
 mkdir -p /tmp/numba_cache\n\
 chmod 777 /tmp/numba_cache\n\
+chown -R appuser:$PGID /tmp/numba_cache 2>/dev/null || true\n\
 \n\
 # 如果models目录存在，尝试调整权限\n\
 if [ -d "/app/models" ]; then\n\
-    chown -R appuser:appuser /app/models 2>/dev/null || true\n\
+    chown -R appuser:$PGID /app/models 2>/dev/null || true\n\
 fi\n\
+\n\
+# 设置环境变量确保配置目录正确\n\
+export MPLCONFIGDIR=/home/appuser/.config/matplotlib\n\
+export HOME=/home/appuser\n\
 \n\
 # 切换到appuser并启动应用\n\
 exec gosu appuser python3 app.py\n\
@@ -123,9 +146,9 @@ RUN apt-get update && apt-get install -y gosu && rm -rf /var/lib/apt/lists/*
 # 暴露端口
 EXPOSE 5092
 
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5092/', timeout=10)" || exit 1
+# 健康检查 - 使用专门的健康检查脚本
+HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 \
+    CMD /usr/local/bin/healthcheck.sh
 
 # 启动命令
 CMD ["/usr/local/bin/start.sh"]

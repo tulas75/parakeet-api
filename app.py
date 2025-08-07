@@ -4,6 +4,13 @@ import os,sys,json,math
 os.environ['NUMBA_CACHE_DIR'] = '/tmp/numba_cache'
 os.environ['NUMBA_DISABLE_JIT'] = '0'
 
+# 设置matplotlib配置目录，避免权限问题
+if 'MPLCONFIGDIR' not in os.environ:
+    os.environ['MPLCONFIGDIR'] = '/tmp/matplotlib_config'
+    # 确保目录存在
+    os.makedirs('/tmp/matplotlib_config', exist_ok=True)
+    os.chmod('/tmp/matplotlib_config', 0o777)
+
 host = '0.0.0.0'
 port = 5092
 threads = 4
@@ -592,6 +599,72 @@ def segments_to_srt(segments: list) -> str:
     return "\n".join(srt_content)
 
 # --- Flask 路由 ---
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """
+    健康检查端点 - 用于Docker健康检查和服务监控
+    """
+    try:
+        # 检查基本服务状态
+        health_status = {
+            "status": "healthy",
+            "timestamp": datetime.datetime.now().isoformat(),
+            "service": "parakeet-api",
+            "version": "1.0.0"
+        }
+        
+        # 检查CUDA状态
+        global cuda_available
+        if cuda_available:
+            try:
+                allocated, reserved, total = get_gpu_memory_usage()
+                health_status["gpu"] = {
+                    "available": True,
+                    "memory_allocated_gb": round(allocated, 2),
+                    "memory_total_gb": round(total, 2),
+                    "memory_usage_percent": round((allocated/total)*100, 1) if total > 0 else 0
+                }
+            except Exception as e:
+                health_status["gpu"] = {
+                    "available": True,
+                    "error": str(e)
+                }
+        else:
+            health_status["gpu"] = {
+                "available": False,
+                "mode": "cpu"
+            }
+        
+        # 检查模型状态
+        health_status["model"] = {
+            "loaded": asr_model is not None,
+            "lazy_load": ENABLE_LAZY_LOAD
+        }
+        
+        # 检查内存使用
+        memory = psutil.virtual_memory()
+        health_status["system"] = {
+            "memory_usage_percent": memory.percent,
+            "memory_available_gb": round(memory.available / 1024**3, 2)
+        }
+        
+        return jsonify(health_status), 200
+        
+    except Exception as e:
+        error_status = {
+            "status": "unhealthy",
+            "timestamp": datetime.datetime.now().isoformat(),
+            "error": str(e)
+        }
+        return jsonify(error_status), 500
+
+@app.route('/health/simple', methods=['GET'])
+def simple_health_check():
+    """
+    简单健康检查端点 - 仅返回HTTP 200状态
+    """
+    return "OK", 200
 
 @app.route('/v1/audio/transcriptions', methods=['POST'])
 def transcribe_audio():
