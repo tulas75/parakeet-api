@@ -32,7 +32,7 @@ env:
 
 jobs:
   build:
-    name: 🔨 Build Slim Image
+    name: 🔨 Build Full Image
     runs-on: ubuntu-latest
     outputs:
       should-push: ${{ steps.check-push.outputs.should-push }}
@@ -136,19 +136,23 @@ jobs:
             org.opencontainers.image.description=NeMo Parakeet ASR API Docker image - Slim version with optimized size and performance
             org.opencontainers.image.vendor=fqscfqj
 
-      - name: 🔨 Build Docker image
+      - name: 🔨 Build Docker image (Full)
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile.slim
+          file: Dockerfile
           platforms: linux/amd64
           push: ${{ steps.check-push.outputs.should-push == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:full
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+
+      # (Slim 构建已移除)
 
       - name: 🧹 Cleanup after build
         if: always()
@@ -181,13 +185,21 @@ jobs:
             exit 1
           fi
 
+          # 检查 FULL 镜像是否成功推送
+          if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:full > /dev/null 2>&1; then
+            echo "✅ Full 镜像已成功推送到 GHCR (tag: full)"
+          else
+            echo "❌ Full 镜像推送可能失败，请检查权限和网络"
+            exit 1
+          fi
+
       - name: 📋 Output image info
         if: ${{ steps.check-push.outputs.should-push == 'true' }}
         run: |
           echo "## 🐳 Parakeet ASR API Docker镜像构建完成" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**镜像版本:** Slim (轻量优化版)" >> $GITHUB_STEP_SUMMARY
-          echo "**Dockerfile:** Dockerfile.slim" >> $GITHUB_STEP_SUMMARY
+          echo "**镜像版本:** Full (完整环境版)" >> $GITHUB_STEP_SUMMARY
+          echo "**Dockerfile:** Dockerfile" >> $GITHUB_STEP_SUMMARY
           echo "**支持平台:** linux/amd64" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**📦 GHCR 镜像地址:**" >> $GITHUB_STEP_SUMMARY
@@ -201,6 +213,8 @@ jobs:
           echo "**使用方法:**" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
           echo "docker run -p 5092:5092 -v ./models:/app/models:ro ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "# 或者显式使用 full 标签" >> $GITHUB_STEP_SUMMARY
+          echo "docker run -p 5092:5092 -v ./models:/app/models:ro ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:full" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   security-scan:
@@ -234,7 +248,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-results.sarif'
-          category: 'trivy-slim'
+          category: 'trivy-full'
 
   update-description:
     name: 📝 Update Package Description
@@ -258,7 +272,7 @@ jobs:
 
       - name: 📝 Update package description
         run: |
-          echo "更新Slim版镜像描述..."
+          echo "更新镜像描述..."
           docker buildx imagetools create \
             --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
             --annotation "index:org.opencontainers.image.description=🎙️ NeMo Parakeet ASR API - 高性能语音识别服务，支持长音频分片处理、GPU加速和多种输出格式。Slim version with optimized size and performance." \
@@ -284,11 +298,11 @@ jobs:
           
           # 构建结果
           if [ "${{ needs.build.result }}" = "success" ]; then
-            echo "- ✅ Slim版构建: 成功" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Full版构建: 成功" >> $GITHUB_STEP_SUMMARY
           elif [ "${{ needs.build.result }}" = "skipped" ]; then
-            echo "- ⏭️ Slim版构建: 跳过" >> $GITHUB_STEP_SUMMARY
+            echo "- ⏭️ Full版构建: 跳过" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- ❌ Slim版构建: 失败" >> $GITHUB_STEP_SUMMARY
+            echo "- ❌ Full版构建: 失败" >> $GITHUB_STEP_SUMMARY
           fi
           
           # 安全扫描结果
@@ -305,22 +319,19 @@ jobs:
           
           # 根据构建结果显示可用镜像
           if [ "${{ needs.build.result }}" = "success" ]; then
-            echo "- Slim版: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
+            echo "- Full版: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\` (同 \`full\`)" >> $GITHUB_STEP_SUMMARY
           fi
           
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**使用方法:**" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
           if [ "${{ needs.build.result }}" = "success" ]; then
-            echo "# Parakeet ASR API (Slim优化版)" >> $GITHUB_STEP_SUMMARY
+            echo "# Parakeet ASR API (Full 完整环境版)" >> $GITHUB_STEP_SUMMARY
             echo "docker run -p 5092:5092 -v ./models:/app/models:ro ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
           fi
           echo '```' >> $GITHUB_STEP_SUMMARY
           
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**✨ Slim版特性:**" >> $GITHUB_STEP_SUMMARY
-          echo "- 🚀 镜像大小优化 50-60%" >> $GITHUB_STEP_SUMMARY
-          echo "- ⚡ 启动速度提升 30-40%" >> $GITHUB_STEP_SUMMARY
-          echo "- 💾 内存占用减少 25-30%" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔧 仅包含运行时必需组件" >> $GITHUB_STEP_SUMMARY
-          echo "- 🎯 专为生产环境优化" >> $GITHUB_STEP_SUMMARY
+          echo "**镜像说明:**" >> $GITHUB_STEP_SUMMARY
+          echo "- 提供完整运行环境，便于开箱即用" >> $GITHUB_STEP_SUMMARY
+          echo "- 默认标签 \`latest\` 指向 Full 版本" >> $GITHUB_STEP_SUMMARY

@@ -29,8 +29,8 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && apt-get autoremove -y
 
-# 升级pip到最新版本
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# 升级pip到最新版本（绑定到 python3）
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # 设置CUDA环境变量
 ENV CUDA_HOME=/usr/local/cuda
@@ -43,12 +43,12 @@ WORKDIR /app
 # 复制requirements.txt
 COPY requirements.txt .
 
-# 安装Python依赖
-RUN pip install --no-cache-dir \
+# 安装Python依赖（确保安装到 python3 环境）
+RUN python3 -m pip install --no-cache-dir \
     numpy \
     typing_extensions \
     Cython \
-    && pip install --no-cache-dir -r requirements.txt
+    && python3 -m pip install --no-cache-dir -r requirements.txt
 
 # 验证关键包是否安装成功
 RUN python3 -c "import flask; print('Flask version:', flask.__version__)" && \
