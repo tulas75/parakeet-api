@@ -14,6 +14,8 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 # 更新并安装系统依赖（精简：仅运行时必需）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3-pip \
+    # 构建部分需要的开发工具链（用于编译 texterrors 等C++扩展）\
+    build-essential g++ gcc python3-dev pkg-config \
     ffmpeg \
     curl \
     ca-certificates \
