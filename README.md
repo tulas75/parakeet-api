@@ -17,6 +17,11 @@
 - 前端页面支持拖拽上传、进度显示、结果下载
 - 支持 Docker 一键部署，自动挂载模型和临时目录
 - 支持 GPU 加速（需 NVIDIA 驱动和 CUDA 环境）
+ - **静音对齐切片**：目标切片边界自动对齐最近静音，避免在句中硬切
+ - **可选去噪前处理**：一行开关 `ffmpeg` 温和降噪/均衡/动态范围，提升嘈杂环境识别率
+ - **改进重叠去重**：更鲁棒的重叠段合并与去重，减少重复和缺字
+ - **可选 Beam Search**：若模型支持，启用小规模 beam 提升解码稳定性
+ - **显存利用优化**：仅按需请求时间戳、推理并发管控、可调 DataLoader/Batch、可配置 GPU 内存比例
 
 ## 依赖环境
 - Python 3.10+
@@ -208,6 +213,61 @@ environment:
   - CHUNK_OVERLAP_SECONDS=30
   - SENTENCE_BOUNDARY_THRESHOLD=0.5
 ```
+
+### 静音对齐与音频前处理
+
+新增提升准确率的开关：
+
+```yaml
+environment:
+  # 静音对齐切片（默认启用）
+  - ENABLE_SILENCE_ALIGNED_CHUNKING=true
+  - SILENCE_THRESHOLD_DB=-38dB        # 静音判定阈值（dB），绝对值越大越容易判静音
+  - MIN_SILENCE_DURATION=0.35         # 静音最小时长（秒）
+  - SILENCE_MAX_SHIFT_SECONDS=2.0     # 分割点向静音对齐的最大偏移（秒）
+
+  # ffmpeg 预处理（默认关闭）
+  - ENABLE_FFMPEG_DENOISE=false
+  - DENOISE_FILTER=afftdn=nf=-25,highpass=f=50,lowpass=f=8000,dynaudnorm=m=7:s=5
+
+  # 解码策略（若模型支持）
+  - DECODING_STRATEGY=beam            # greedy | beam
+  - RNNT_BEAM_SIZE=4
+```
+
+### 一键预设（简化环境变量）
+
+最少只需要 1-2 个变量：
+
+```yaml
+environment:
+  - PRESET=balanced          # speed | balanced | quality
+  - GPU_VRAM_GB=8           # 可选，设置你显卡显存（GB），不填则自动探测
+```
+
+解释：
+- **PRESET**
+  - speed：优先速度，使用 greedy 解码，适度增大并发（高显存），分块稍大
+  - balanced（默认）：准确与速度平衡，beam 小束宽，分块适中
+  - quality：优先准确，使用 beam 解码，小并发，分块稍小
+- **GPU_VRAM_GB**：设置后更精确；不设置则会尝试自动探测 GPU 显存
+
+如需细调，仍可使用以下可选变量（有默认，不需要必填）：
+```yaml
+environment:
+  - CHUNK_MINITE=10
+  - MAX_CONCURRENT_INFERENCES=1
+  - GPU_MEMORY_FRACTION=0.92
+  - DECODING_STRATEGY=beam    # greedy | beam
+  - RNNT_BEAM_SIZE=4
+  - TRANSCRIBE_BATCH_SIZE=1
+  - TRANSCRIBE_NUM_WORKERS=0
+```
+
+说明：
+- **静音对齐切片**：在每个切片起点附近寻找最近静音边界，对齐后再裁切，尽量避免在句中间硬切导致的误识别与重复。
+- **DENOISE_FILTER**：默认是一组较温和的降噪/滤波/动态范围归一参数，建议在嘈杂环境或强底噪场景开启。
+- **Beam Search**：对支持 `change_decoding_strategy` 的 NeMo 模型生效，`beam_size` 建议 2-6 之间平衡延迟与质量。
 
 ### 句子完整性原理
 

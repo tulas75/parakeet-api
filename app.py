@@ -64,6 +64,10 @@ last_request_time = None
 model_lock = threading.Lock()
 cuda_available = False  # 全局CUDA兼容性标志
 
+# 推理并发控制（避免多请求同时占用显存导致 OOM）
+MAX_CONCURRENT_INFERENCES = int(os.environ.get('MAX_CONCURRENT_INFERENCES', '1'))
+inference_semaphore = threading.Semaphore(MAX_CONCURRENT_INFERENCES)
+
 # 显存优化配置
 AGGRESSIVE_MEMORY_CLEANUP = os.environ.get('AGGRESSIVE_MEMORY_CLEANUP', 'true').lower() in ['true', '1', 't']
 ENABLE_GRADIENT_CHECKPOINTING = os.environ.get('ENABLE_GRADIENT_CHECKPOINTING', 'true').lower() in ['true', '1', 't']
@@ -74,11 +78,38 @@ FORCE_CLEANUP_THRESHOLD = float(os.environ.get('FORCE_CLEANUP_THRESHOLD', '0.8')
 ENABLE_TENSOR_CORE = os.environ.get('ENABLE_TENSOR_CORE', 'true').lower() in ['true', '1', 't']
 ENABLE_CUDNN_BENCHMARK = os.environ.get('ENABLE_CUDNN_BENCHMARK', 'true').lower() in ['true', '1', 't']
 TENSOR_CORE_PRECISION = os.environ.get('TENSOR_CORE_PRECISION', 'highest')  # highest, high, medium
+GPU_MEMORY_FRACTION = float(os.environ.get('GPU_MEMORY_FRACTION', '0.95'))  # 进程允许使用的显存比例
 
 # 句子完整性优化配置
 ENABLE_OVERLAP_CHUNKING = os.environ.get('ENABLE_OVERLAP_CHUNKING', 'true').lower() in ['true', '1', 't']
 CHUNK_OVERLAP_SECONDS = float(os.environ.get('CHUNK_OVERLAP_SECONDS', '30'))  # 重叠时长
 SENTENCE_BOUNDARY_THRESHOLD = float(os.environ.get('SENTENCE_BOUNDARY_THRESHOLD', '0.5'))  # 句子边界检测阈值
+
+
+# 静音对齐切片与前处理配置
+ENABLE_SILENCE_ALIGNED_CHUNKING = os.environ.get('ENABLE_SILENCE_ALIGNED_CHUNKING', 'true').lower() in ['true', '1', 't']
+SILENCE_THRESHOLD_DB = os.environ.get('SILENCE_THRESHOLD_DB', '-38dB')  # ffmpeg silencedetect 噪声阈值
+MIN_SILENCE_DURATION = float(os.environ.get('MIN_SILENCE_DURATION', '0.35'))  # 认为是静音的最小时长(秒)
+SILENCE_MAX_SHIFT_SECONDS = float(os.environ.get('SILENCE_MAX_SHIFT_SECONDS', '2.0'))  # 目标分割点附近允许向静音对齐的最大偏移(秒)
+
+ENABLE_FFMPEG_DENOISE = os.environ.get('ENABLE_FFMPEG_DENOISE', 'false').lower() in ['true', '1', 't']
+# 合理的默认去噪/均衡/动态范围设置，尽可能温和，避免过拟合
+DENOISE_FILTER = os.environ.get(
+    'DENOISE_FILTER',
+    'afftdn=nf=-25,highpass=f=50,lowpass=f=8000,dynaudnorm=m=7:s=5'
+)
+
+# 解码策略（若模型支持）
+DECODING_STRATEGY = os.environ.get('DECODING_STRATEGY', 'beam')  # 可选: greedy, beam
+RNNT_BEAM_SIZE = int(os.environ.get('RNNT_BEAM_SIZE', '4'))
+
+# Nemo 转写运行时配置（批量与DataLoader）
+TRANSCRIBE_BATCH_SIZE = int(os.environ.get('TRANSCRIBE_BATCH_SIZE', '1'))
+TRANSCRIBE_NUM_WORKERS = int(os.environ.get('TRANSCRIBE_NUM_WORKERS', '0'))
+
+# 简化配置：预设与GPU显存（GB）
+PRESET = os.environ.get('PRESET', 'balanced').lower()  # speed | balanced | quality | simple(=balanced)
+GPU_VRAM_GB_ENV = os.environ.get('GPU_VRAM_GB', '').strip()
 
 
 # 确保临时上传目录存在
@@ -129,7 +160,11 @@ def setup_tensor_core_optimization():
             print("✅ 设置为中等精度模式")
         
         # 设置内存分配策略以优化 Tensor Core 使用
-        torch.cuda.set_per_process_memory_fraction(0.95)  # 使用95%的显存
+        try:
+            torch.cuda.set_per_process_memory_fraction(GPU_MEMORY_FRACTION)
+            print(f"✅ GPU 内存分配比例: {GPU_MEMORY_FRACTION*100:.0f}%")
+        except Exception as e:
+            print(f"⚠️ 设置内存分配比例失败: {e}")
         print("✅ GPU 内存分配策略已优化")
     except Exception as e:
         print(f"⚠️ Tensor Core优化配置失败: {e}")
@@ -233,39 +268,38 @@ def merge_overlapping_segments(all_segments: list, chunk_boundaries: list, overl
     if not ENABLE_OVERLAP_CHUNKING or len(chunk_boundaries) <= 1:
         return all_segments
     
-    merged_segments = []
-    current_chunk_segments = []
-    current_chunk_index = 0
-    
-    print(f"开始合并 {len(all_segments)} 个segments，chunk边界: {chunk_boundaries}")
-    
-    for segment in all_segments:
-        segment_start = segment['start']
-        segment_end = segment['end']
-        
-        # 确定当前segment属于哪个chunk
-        while (current_chunk_index < len(chunk_boundaries) - 1 and 
-               segment_start >= chunk_boundaries[current_chunk_index + 1] - overlap_seconds):
-            # 处理前一个chunk的segments
-            if current_chunk_segments:
-                # 处理重叠区域
-                overlap_start = chunk_boundaries[current_chunk_index + 1] - overlap_seconds
-                processed_segments = process_chunk_segments(
-                    current_chunk_segments, overlap_start, overlap_seconds
-                )
-                merged_segments.extend(processed_segments)
-                current_chunk_segments = []
-            
-            current_chunk_index += 1
-        
-        current_chunk_segments.append(segment)
-    
-    # 处理最后一个chunk
-    if current_chunk_segments:
-        merged_segments.extend(current_chunk_segments)
-    
-    print(f"合并完成，最终 {len(merged_segments)} 个segments")
-    return merged_segments
+    # 简化并更鲁棒：按时间排序，然后基于重叠窗口内去重同文段落
+    if not all_segments:
+        return []
+    all_segments_sorted = sorted(all_segments, key=lambda s: (s.get('start', 0.0), s.get('end', 0.0)))
+    merged = []
+    for seg in all_segments_sorted:
+        text = seg.get('segment', '').strip()
+        if not text:
+            continue
+        if not merged:
+            merged.append(seg)
+            continue
+        prev = merged[-1]
+        # 若时间上高度重叠，且文本高相似（或完全相同），则保留更长/置信度更高的一条
+        overlap = min(prev['end'], seg['end']) - max(prev['start'], seg['start'])
+        window = overlap_seconds * 0.9 if overlap_seconds else 0.0
+        def normalized(t: str) -> str:
+            return ''.join(t.split()).lower()
+        same_text = normalized(prev.get('segment', '')) == normalized(text)
+        if overlap > 0 and overlap >= min(prev['end'] - prev['start'], seg['end'] - seg['start']) * 0.5:
+            if same_text or overlap >= window:
+                # 选择时间更长的段落
+                if (prev['end'] - prev['start']) >= (seg['end'] - seg['start']):
+                    # 可能扩展尾部
+                    prev['end'] = max(prev['end'], seg['end'])
+                else:
+                    merged[-1] = seg
+                continue
+        # 否则直接追加
+        merged.append(seg)
+    print(f"合并完成，最终 {len(merged)} 个segments")
+    return merged
 
 def process_chunk_segments(segments: list, overlap_start: float, overlap_seconds: float) -> list:
     """处理单个chunk的segments，处理重叠区域"""
@@ -503,6 +537,12 @@ def load_model_if_needed():
                     loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=model_path)
                     loaded_model = optimize_model_for_inference(loaded_model)
                 
+                # 配置解码策略（若模型支持）
+                try:
+                    configure_decoding_strategy(loaded_model)
+                except Exception as e:
+                    print(f"⚠️ 配置解码策略失败，将使用默认解码: {e}")
+
                 asr_model = loaded_model
                 print("✅ NeMo ASR 模型加载成功！")
                 print("="*50)
@@ -608,6 +648,56 @@ def segments_to_srt(segments: list) -> str:
             srt_content.append("") # 空行分隔
             
     return "\n".join(srt_content)
+
+
+def parse_ffmpeg_silence_log(ffmpeg_stderr: str) -> list:
+    """解析 ffmpeg silencedetect 输出，返回静音区间 [(start, end), ...]。"""
+    import re
+    silence_starts = []
+    silence_intervals = []
+    # silencedetect 输出示例:
+    # [silencedetect @ 0x...] silence_start: 12.345
+    # [silencedetect @ 0x...] silence_end: 13.789 | silence_duration: 1.444
+    start_re = re.compile(r"silence_start:\s*([0-9.]+)")
+    end_re = re.compile(r"silence_end:\s*([0-9.]+)")
+    for line in ffmpeg_stderr.splitlines():
+        m = start_re.search(line)
+        if m:
+            silence_starts.append(float(m.group(1)))
+            continue
+        m = end_re.search(line)
+        if m and silence_starts:
+            start = silence_starts.pop(0)
+            end = float(m.group(1))
+            silence_intervals.append((start, end))
+    return silence_intervals
+
+
+def find_nearest_silence(target_time: float, silence_intervals: list, max_shift: float) -> float:
+    """在 target_time 附近查找最近的静音边界，返回建议的切片开始时间。若未找到合适静音点，则返回 target_time。"""
+    if not silence_intervals:
+        return target_time
+    best_time = target_time
+    best_dist = max_shift + 1.0
+    for start, end in silence_intervals:
+        for edge in (start, end):
+            dist = abs(edge - target_time)
+            if dist < best_dist and dist <= max_shift:
+                best_dist = dist
+                best_time = edge
+    return best_time
+
+
+def detect_silences_with_ffmpeg(source_wav: str) -> list:
+    """使用 ffmpeg silencedetect 检测静音区间。"""
+    command = [
+        'ffmpeg', '-hide_banner', '-nostats', '-i', source_wav,
+        '-af', f'silencedetect=noise={SILENCE_THRESHOLD_DB}:d={MIN_SILENCE_DURATION}',
+        '-f', 'null', '-' 
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    # 无论返回码如何，stderr 都包含 silencedetect 输出
+    return parse_ffmpeg_silence_log(result.stderr)
 
 # --- Flask 路由 ---
 
@@ -742,10 +832,17 @@ def transcribe_audio():
         temp_files_to_clean.append(temp_original_path)
         
         print(f"[{unique_id}] 正在将 '{original_filename}' 转换为标准 WAV 格式...")
+        # 可选前处理滤波器
+        ffmpeg_filters = []
+        if ENABLE_FFMPEG_DENOISE:
+            ffmpeg_filters.append(DENOISE_FILTER)
         ffmpeg_command = [
-            'ffmpeg', '-y', '-i', temp_original_path,
-            '-ac', '1', '-ar', '16000', target_wav_path
+            'ffmpeg', '-y', '-vn', '-sn', '-dn', '-i', temp_original_path,
+            '-ac', '1', '-ar', '16000'
         ]
+        if ffmpeg_filters:
+            ffmpeg_command += ['-af', ','.join(ffmpeg_filters)]
+        ffmpeg_command += [target_wav_path]
         result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"FFmpeg 错误: {result.stderr}")
@@ -803,12 +900,30 @@ def transcribe_audio():
             num_chunks = len(chunk_info_list)
             print(f"[{unique_id}] 文件总时长: {total_duration:.2f}s. 将切分为 {num_chunks} 个片段。")
             
+            # 若启用静音对齐，则预先检测静音区间
+            silence_intervals = []
+            if ENABLE_SILENCE_ALIGNED_CHUNKING and total_duration > CHUNK_DURATION_SECONDS:
+                print(f"[{unique_id}] 检测静音区间用于分割对齐: noise={SILENCE_THRESHOLD_DB}, min_dur={MIN_SILENCE_DURATION}s")
+                silence_intervals = detect_silences_with_ffmpeg(target_wav_path)
+                print(f"[{unique_id}] 共检测到 {len(silence_intervals)} 段静音区间")
+
             for i, chunk_info in enumerate(chunk_info_list):
                 chunk_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_chunk_{i}.wav")
                 chunk_paths.append(chunk_path)
                 temp_files_to_clean.append(chunk_path)
                 
                 start_time = chunk_info['start']
+                # 将切片开始对齐到最近静音边界（不超过最大偏移）
+                if ENABLE_SILENCE_ALIGNED_CHUNKING and silence_intervals:
+                    aligned_start = find_nearest_silence(start_time, silence_intervals, SILENCE_MAX_SHIFT_SECONDS)
+                    if aligned_start != start_time:
+                        print(f"[{unique_id}] 切片{i+1} 开始时间 {start_time:.2f}s 对齐至静音 {aligned_start:.2f}s")
+                        # 同时调整该chunk的结束，保持 duration 不变
+                        shift = aligned_start - start_time
+                        start_time = max(0.0, aligned_start)
+                        chunk_info['start'] = start_time
+                        chunk_info['end'] = min(total_duration, chunk_info['end'] + shift)
+                        chunk_info['duration'] = chunk_info['end'] - chunk_info['start']
                 duration = chunk_info['duration']
                 
                 print(f"[{unique_id}] 正在创建切片 {i+1}/{num_chunks} ({start_time:.1f}s - {chunk_info['end']:.1f}s)...")
@@ -828,6 +943,10 @@ def transcribe_audio():
         all_segments = []
         all_words = []
         chunk_boundaries = []
+        # 仅在需要 SRT/VTT/verbose_json 时请求时间戳，减少显存与计算
+        need_timestamps = response_format in ['srt', 'vtt', 'verbose_json']
+        collect_word_timestamps = response_format == 'verbose_json'
+        full_text_parts = []  # 当不需要时间戳时，直接收集文本
 
         for i, (chunk_path, chunk_info) in enumerate(zip(chunk_paths, chunk_info_list)):
             print(f"[{unique_id}] 正在转录切片 {i+1}/{num_chunks}...")
@@ -848,13 +967,15 @@ def transcribe_audio():
             
             # 对当前切片进行转录
             # 使用 with torch.cuda.amp.autocast() 在半精度下运行推理
-            with torch.no_grad():  # 确保不计算梯度
-                if cuda_available:
-                    with torch.cuda.amp.autocast(dtype=torch.float16):
-                        output = local_asr_model.transcribe([chunk_path], timestamps=True)
-                else:
-                    # CPU模式下直接转录
-                    output = local_asr_model.transcribe([chunk_path], timestamps=True)
+            # 推理模式进一步降低内存/开销，并发控制避免 OOM
+            with inference_semaphore:
+                output = safe_transcribe(
+                    local_asr_model,
+                    chunk_path,
+                    need_timestamps=need_timestamps,
+                    batch_size=TRANSCRIBE_BATCH_SIZE,
+                    num_workers=TRANSCRIBE_NUM_WORKERS,
+                )
 
             # 立即进行内存清理
             if AGGRESSIVE_MEMORY_CLEANUP:
@@ -871,21 +992,34 @@ def transcribe_audio():
             chunk_start_offset = chunk_info['start']
             chunk_boundaries.append(chunk_start_offset)
             
-            if output and output[0].timestamp:
-                # 修正并收集 segment 时间戳（使用chunk在原音频中的真实起始时间）
-                if 'segment' in output[0].timestamp:
-                    for seg in output[0].timestamp['segment']:
-                        seg['start'] += chunk_start_offset
-                        seg['end'] += chunk_start_offset
-                        all_segments.append(seg)
-                
-                # 修正并收集 word 时间戳
-                if 'word' in output[0].timestamp:
-                     for word in output[0].timestamp['word']:
-                        word['start'] += chunk_start_offset
-                        word['end'] += chunk_start_offset
-                        all_words.append(word)
+            if need_timestamps:
+                if output and getattr(output[0], 'timestamp', None):
+                    # 修正并收集 segment 时间戳
+                    if 'segment' in output[0].timestamp:
+                        for seg in output[0].timestamp['segment']:
+                            seg['start'] += chunk_start_offset
+                            seg['end'] += chunk_start_offset
+                            all_segments.append(seg)
+                    # 修正并收集 word 时间戳（仅在 verbose_json 需要）
+                    if collect_word_timestamps and 'word' in output[0].timestamp:
+                        for word in output[0].timestamp['word']:
+                            word['start'] += chunk_start_offset
+                            word['end'] += chunk_start_offset
+                            all_words.append(word)
+                else:
+                    # 某些模型/配置可能不返回时间戳，尝试直接文本回退
+                    if isinstance(output, list) and output:
+                        full_text_parts.append(str(output[0]))
+            else:
+                # 不需要时间戳，直接取文本
+                if isinstance(output, list) and output:
+                    full_text_parts.append(str(output[0]))
             
+            # 释放临时输出引用
+            try:
+                del output
+            except Exception:
+                pass
             # 立即删除已处理的chunk文件以节省磁盘空间和内存
             if num_chunks > 1 and os.path.exists(chunk_path):
                 try:
@@ -912,6 +1046,9 @@ def transcribe_audio():
         
         # 根据 response_format 返回不同格式
         if response_format == 'text':
+            if not full_text:
+                # 当未启用时间戳且直接收集文本
+                full_text = " ".join(full_text_parts) if full_text_parts else ""
             return Response(full_text, mimetype='text/plain')
         elif response_format == 'srt':
             srt_result = segments_to_srt(all_segments)
@@ -955,9 +1092,11 @@ def transcribe_audio():
             return jsonify(response_data)
         else:
             # 默认 JSON 格式 (response_format == 'json')
-            response_data = {
-                "text": full_text
-            }
+            if not all_segments:
+                # 当未启用时间戳，text 来自 direct 输出
+                if not full_text:
+                    full_text = " ".join(full_text_parts) if full_text_parts else ""
+            response_data = {"text": full_text}
             return jsonify(response_data)
 
     except Exception as e:
@@ -1032,6 +1171,96 @@ def format_vtt_time(seconds: float) -> str:
     
     return f"{integer_part}.{fractional_part}"
 
+
+def configure_decoding_strategy(model):
+    """配置 NeMo 模型的解码策略（若支持）。
+    - 对 RNNT/Conformer-Transducer 等模型，尝试开启 beam search。
+    - 若模型不支持相应属性，静默跳过。
+    """
+    try:
+        if hasattr(model, 'change_decoding_strategy'):
+            if DECODING_STRATEGY == 'beam':
+                model.change_decoding_strategy(decoding_cfg={
+                    'strategy': 'beam',
+                    'beam_size': RNNT_BEAM_SIZE,
+                })
+                print(f"✅ 启用 Beam Search，beam_size={RNNT_BEAM_SIZE}")
+            else:
+                model.change_decoding_strategy(decoding_cfg={'strategy': 'greedy'})
+                print("✅ 启用 Greedy 解码")
+        elif hasattr(model, 'decoder') and hasattr(model.decoder, 'cfg'):
+            # 兼容部分模型的 decoder 配置
+            decoder_cfg = getattr(model.decoder, 'cfg')
+            if DECODING_STRATEGY == 'beam' and hasattr(decoder_cfg, 'beam_size'):
+                decoder_cfg.beam_size = RNNT_BEAM_SIZE
+                print(f"✅ 配置 decoder.beam_size={RNNT_BEAM_SIZE}")
+            # 其余情况按默认
+    except Exception as e:
+        print(f"⚠️ 设置解码策略时出错: {e}")
+
+
+def safe_transcribe(model, audio_path: str, need_timestamps: bool, batch_size: int, num_workers: int):
+    """执行一次安全的转写：
+    - 使用 autocast + inference_mode 降低显存
+    - 如遇 CUDA OOM，自动降级为 greedy 解码并重试一次
+    """
+    global DECODING_STRATEGY
+    try:
+        if cuda_available:
+            with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.float16):
+                return model.transcribe(
+                    [audio_path],
+                    timestamps=need_timestamps,
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                )
+        else:
+            with torch.inference_mode():
+                return model.transcribe(
+                    [audio_path],
+                    timestamps=need_timestamps,
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                )
+    except RuntimeError as e:
+        if 'CUDA out of memory' in str(e) or 'CUDA error' in str(e):
+            print("⚠️ 检测到 CUDA 内存不足，尝试降级为 greedy 解码并重试一次…")
+            aggressive_memory_cleanup()
+            # 记录原策略并降级
+            original_strategy = DECODING_STRATEGY
+            try:
+                # 强制切换为 greedy
+                os.environ['DECODING_STRATEGY'] = 'greedy'
+                DECODING_STRATEGY = 'greedy'
+                configure_decoding_strategy(model)
+                # 重试
+                if cuda_available:
+                    with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.float16):
+                        return model.transcribe(
+                            [audio_path],
+                            timestamps=need_timestamps,
+                            batch_size=1,  # 进一步收缩批量
+                            num_workers=0,
+                        )
+                else:
+                    with torch.inference_mode():
+                        return model.transcribe(
+                            [audio_path],
+                            timestamps=need_timestamps,
+                            batch_size=1,
+                            num_workers=0,
+                        )
+            finally:
+                # 尝试恢复原策略（若需要）
+                os.environ['DECODING_STRATEGY'] = original_strategy
+                DECODING_STRATEGY = original_strategy
+                try:
+                    configure_decoding_strategy(model)
+                except Exception:
+                    pass
+        # 非OOM错误原样抛出
+        raise
+
 # --- Waitress 服务器启动 ---
 if __name__ == '__main__':
     
@@ -1060,6 +1289,72 @@ if __name__ == '__main__':
     else:
         print("API Key 认证已禁用，任何请求都将被接受。")
 
+
+    # === 简化配置预设推导 ===
+    # 计算可用 GPU 显存（或读取用户提供的 GPU_VRAM_GB），结合 PRESET 设置其它参数
+    try:
+        detected_vram_gb = None
+        if check_cuda_compatibility():
+            _, _, total_gb = get_gpu_memory_usage()
+            detected_vram_gb = round(total_gb)
+    except Exception:
+        detected_vram_gb = None
+
+    gpu_vram_gb = None
+    try:
+        gpu_vram_gb = int(GPU_VRAM_GB_ENV) if GPU_VRAM_GB_ENV else detected_vram_gb
+    except Exception:
+        gpu_vram_gb = detected_vram_gb
+
+    preset = PRESET if PRESET in ['speed', 'balanced', 'quality', 'simple'] else 'balanced'
+    if preset == 'simple':
+        preset = 'balanced'
+
+    # 基于预设和显存推导参数（仅当用户未显式覆盖时生效）
+    def set_if_default(name: str, current, value):
+        # 仅当环境变量未显式设置时替换默认
+        if os.environ.get(name) is None:
+            return value
+        return current
+
+    # CHUNK_MINITE
+    if gpu_vram_gb is not None:
+        if preset == 'speed':
+            CHUNK_MINITE = set_if_default('CHUNK_MINITE', CHUNK_MINITE,  min(20, 10 if gpu_vram_gb < 12 else 15))
+        elif preset == 'quality':
+            CHUNK_MINITE = set_if_default('CHUNK_MINITE', CHUNK_MINITE,  max(6, 8 if gpu_vram_gb >= 8 else 6))
+        else:  # balanced
+            CHUNK_MINITE = set_if_default('CHUNK_MINITE', CHUNK_MINITE,  8 if gpu_vram_gb < 8 else 10)
+
+    # 并发与显存占比
+    if preset == 'speed':
+        MAX_CONCURRENT_INFERENCES = set_if_default('MAX_CONCURRENT_INFERENCES', MAX_CONCURRENT_INFERENCES, 2 if (gpu_vram_gb and gpu_vram_gb >= 16) else 1)
+        GPU_MEMORY_FRACTION = set_if_default('GPU_MEMORY_FRACTION', GPU_MEMORY_FRACTION, 0.95)
+        DECODING_STRATEGY = set_if_default('DECODING_STRATEGY', DECODING_STRATEGY, 'greedy')
+    elif preset == 'quality':
+        MAX_CONCURRENT_INFERENCES = set_if_default('MAX_CONCURRENT_INFERENCES', MAX_CONCURRENT_INFERENCES, 1)
+        GPU_MEMORY_FRACTION = set_if_default('GPU_MEMORY_FRACTION', GPU_MEMORY_FRACTION, 0.90)
+        DECODING_STRATEGY = set_if_default('DECODING_STRATEGY', DECODING_STRATEGY, 'beam')
+        RNNT_BEAM_SIZE = set_if_default('RNNT_BEAM_SIZE', RNNT_BEAM_SIZE, 4 if (gpu_vram_gb and gpu_vram_gb >= 8) else 2)
+    else:  # balanced
+        MAX_CONCURRENT_INFERENCES = set_if_default('MAX_CONCURRENT_INFERENCES', MAX_CONCURRENT_INFERENCES, 1)
+        GPU_MEMORY_FRACTION = set_if_default('GPU_MEMORY_FRACTION', GPU_MEMORY_FRACTION, 0.92 if (gpu_vram_gb and gpu_vram_gb >= 12) else 0.90)
+        DECODING_STRATEGY = set_if_default('DECODING_STRATEGY', DECODING_STRATEGY, 'beam')
+        RNNT_BEAM_SIZE = set_if_default('RNNT_BEAM_SIZE', RNNT_BEAM_SIZE, 4)
+
+    # 记录最终预设
+    print(f"预设: {preset}  | GPU_VRAM_GB: {gpu_vram_gb if gpu_vram_gb is not None else 'unknown'}")
+    print(f"推导: CHUNK_MINITE={CHUNK_MINITE}, MAX_CONCURRENT_INFERENCES={MAX_CONCURRENT_INFERENCES}, GPU_MEMORY_FRACTION={GPU_MEMORY_FRACTION}, DECODING_STRATEGY={DECODING_STRATEGY}")
+
+    # 更新并发信号量以匹配推导值
+    try:
+        new_max_conc = int(MAX_CONCURRENT_INFERENCES) if isinstance(MAX_CONCURRENT_INFERENCES, (int, float, str)) else 1
+        if new_max_conc < 1:
+            new_max_conc = 1
+        globals()['inference_semaphore'] = threading.Semaphore(new_max_conc)
+    except Exception as e:
+        print(f"⚠️ 初始化并发信号量失败，使用默认1: {e}")
+        globals()['inference_semaphore'] = threading.Semaphore(1)
 
     print(f"🚀 服务器启动中...")
     print(f"API 端点: POST http://{host}:{port}/v1/audio/transcriptions")

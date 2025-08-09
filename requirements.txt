@@ -2,10 +2,8 @@ numpy
 waitress
 flask
 typing_extensions
-torch
 nemo_toolkit[asr]
 huggingface_hub
-cuda-python>=12.2,<12.3
 librosa>=0.9.2
 numba>=0.56.0
 psutil

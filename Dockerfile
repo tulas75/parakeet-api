@@ -1,5 +1,5 @@
 # 使用单阶段构建，确保包安装可靠性
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
+FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 
 # 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive
@@ -11,28 +11,20 @@ ENV NUMBA_DISABLE_JIT=0
 # 创建非root用户
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# 更新并安装系统依赖
-RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3-pip \
-    python3.10-dev \
-    build-essential \
-    pkg-config \
-    cmake \
-    git \
+# 更新并安装系统依赖（精简：仅运行时必需）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3-pip \
     ffmpeg \
-    sox \
     curl \
-    netcat-openbsd \
+    ca-certificates \
     gosu \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean \
-    && apt-get autoremove -y
+    libsndfile1 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 升级pip到最新版本（绑定到 python3）
+# 升级pip到最新版本
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# 设置CUDA环境变量
+# 设置CUDA环境变量（随CUDA镜像）
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=$CUDA_HOME/bin:$PATH
 ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
@@ -43,17 +35,14 @@ WORKDIR /app
 # 复制requirements.txt
 COPY requirements.txt .
 
-# 安装Python依赖（确保安装到 python3 环境）
-RUN python3 -m pip install --no-cache-dir \
-    numpy \
-    typing_extensions \
-    Cython \
-    && python3 -m pip install --no-cache-dir -r requirements.txt
+# 安装 PyTorch GPU 与 torchaudio（CUDA 12.1 对应的官方轮子）
+RUN python3 -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 \
+    torch==2.4.1 torchaudio==2.4.1 \
+    && python3 -m pip install --no-cache-dir -r requirements.txt \
+    && python3 -m pip cache purge
 
 # 验证关键包是否安装成功
-RUN python3 -c "import flask; print('Flask version:', flask.__version__)" && \
-    python3 -c "import torch; print('PyTorch version:', torch.__version__)" && \
-    python3 -c "import numpy; print('NumPy version:', numpy.__version__)"
+RUN python3 -c "import flask, torch, torchaudio, numpy; print('OK:', flask.__version__, torch.__version__, torchaudio.__version__, numpy.__version__)"
 
 # 复制应用代码和健康检查脚本
 COPY --chown=appuser:appuser . .
@@ -68,8 +57,8 @@ RUN mkdir -p /app/models /app/temp_uploads /tmp/numba_cache \
 # 设置环境变量
 ENV HF_HOME=/app/models
 ENV HF_HUB_DISABLE_SYMLINKS_WARNING=true
-ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-ENV CUDA_LAUNCH_BLOCKING=1
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.85
+ENV CUDA_LAUNCH_BLOCKING=0
 
 # 创建启动脚本
 RUN echo '#!/bin/bash\n\
