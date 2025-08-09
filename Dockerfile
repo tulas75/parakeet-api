@@ -35,10 +35,11 @@ WORKDIR /app
 # 复制requirements.txt
 COPY requirements.txt .
 
-# 安装 PyTorch GPU 与 torchaudio（CUDA 12.1 对应的官方轮子）
-RUN python3 -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 \
-    torch==2.4.1 torchaudio==2.4.1 \
-    && python3 -m pip install --no-cache-dir -r requirements.txt \
+# 安装 PyTorch GPU、torchaudio 和其他依赖（统一解析依赖，避免冲突）
+RUN python3 -m pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cu121 \
+    --extra-index-url https://pypi.org/simple \
+    torch==2.4.1 torchaudio==2.4.1 -r requirements.txt \
     && python3 -m pip cache purge
 
 # 验证关键包是否安装成功
