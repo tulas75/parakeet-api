@@ -257,42 +257,59 @@ environment:
   - SUBTITLE_MIN_GAP_SECONDS=0.06
 ```
 
+### 字幕长度优化：长字幕自动拆分与换行（可选）
+
+当出现“识别出的单条字幕过长”的情况（时长或字符数过长），可以启用以下变量进行拆分与美化：
+
+- `SPLIT_LONG_SUBTITLES`：是否启用长字幕拆分与换行（默认 `true`）
+- `MAX_SUBTITLE_DURATION_SECONDS`：单条字幕允许的最大时长（默认 `6.0` 秒）
+- `MAX_SUBTITLE_CHARS_PER_SEGMENT`：单条字幕允许的最大字符数（默认 `84`，约两行每行 42 字符）
+- `PREFERRED_LINE_LENGTH`：换行时的目标行宽（默认 `42` 字符）
+- `MAX_SUBTITLE_LINES`：每条字幕最多换成多少行（默认 `2`）
+- `ENABLE_WORD_TIMESTAMPS_FOR_SPLIT`：优先使用词级时间戳精确切分（默认 `false`；仅当 `response_format` 不是 `verbose_json` 时才会额外请求词时间戳）
+- `SUBTITLE_SPLIT_PUNCTUATION`：切分时优先考虑的标点集合（默认 `。！？!?.,;；，,`）
+
+推荐配置（将字幕控制在 2 行以内；单条不超过 6 秒或 84 字符）：
+
+```yaml
+environment:
+  - SPLIT_LONG_SUBTITLES=true
+  - MAX_SUBTITLE_DURATION_SECONDS=6.0
+  - MAX_SUBTITLE_CHARS_PER_SEGMENT=84
+  - PREFERRED_LINE_LENGTH=42
+  - MAX_SUBTITLE_LINES=2
+  # 若想更精细按词切开，可开启：
+  # - ENABLE_WORD_TIMESTAMPS_FOR_SPLIT=true
+```
+
 ### 快速变量维护指南（推荐）
 
-面向大多数用户，只需维护 2–3 个变量即可：`PRESET`、`GPU_VRAM_GB`，必要时加 `CHUNK_MINITE`。其它保持默认。
+面向大多数用户，只需维护 1–2 个变量即可：`PRESET`、`GPU_VRAM_GB`。其它保持默认。
 
 #### 一分钟选型
-- 4–6GB：`PRESET=speed`，`GPU_VRAM_GB=6`，`CHUNK_MINITE=3`
-- 8GB（保守安全）：`PRESET=balanced`，`GPU_VRAM_GB=8`，`CHUNK_MINITE=5`，`DECODING_STRATEGY=greedy`
-- ≥12GB：`PRESET=balanced`（或 `quality`），`GPU_VRAM_GB=12`，可不设 `CHUNK_MINITE`；若追求更稳可改 `DECODING_STRATEGY=beam` 并配合 `RNNT_BEAM_SIZE=4`
+- 4–6GB：`PRESET=speed`，`GPU_VRAM_GB=6`
+- 8GB（推荐）：`PRESET=balanced`，`GPU_VRAM_GB=8`
+- ≥12GB：`PRESET=balanced`（或 `quality`），`GPU_VRAM_GB=12`
 
 #### 最小环境块（8GB 稳妥组合，复制即用）
 ```yaml
 environment:
   - PRESET=balanced        # speed | balanced | quality
   - GPU_VRAM_GB=8          # 显存大小（整数）
-  - CHUNK_MINITE=5         # 8GB 建议 5 分钟，防止 OOM
-  - DECODING_STRATEGY=greedy
-  - MAX_CONCURRENT_INFERENCES=1
-  - TRANSCRIBE_BATCH_SIZE=1
-  - TRANSCRIBE_NUM_WORKERS=0
-  - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:96,garbage_collection_threshold:0.85
+  # 可选
+  - ENABLE_LAZY_LOAD=true
+  - API_KEY=
 ```
 
-#### 常用变量（只看这几个）
-- **PRESET**: 一键风格。speed=更快更省显存；balanced=默认；quality=更稳但慢。
+#### 常用变量（仅关注）
+- **PRESET**: 一键风格。`speed`=更快省显存；`balanced`=默认；`quality`=更稳但慢。
 - **GPU_VRAM_GB**: 显存大小（整数），用于自动推导其它参数。
-- **CHUNK_MINITE**: 单段转录时长，越大显存峰值越高。4–8GB 建议 3–6；8GB 推荐 5。
-- **DECODING_STRATEGY**: `greedy` 显存更低；`beam` 更稳（配合 `RNNT_BEAM_SIZE=2–6`）。
-- **MAX_CONCURRENT_INFERENCES**: 并发数。8GB 固定 1。
-- **TRANSCRIBE_BATCH_SIZE / TRANSCRIBE_NUM_WORKERS**: 建议 1 / 0 最省显存。
-- **PYTORCH_CUDA_ALLOC_CONF**: 建议保留以减少显存碎片（镜像已默认设置，显式声明可覆盖）。
-- 可选质量/连贯：`ENABLE_OVERLAP_CHUNKING=true`、`CHUNK_OVERLAP_SECONDS=30`、`ENABLE_SILENCE_ALIGNED_CHUNKING=true`。
+- （可选）**ENABLE_LAZY_LOAD**、**API_KEY**。
 
-#### 调优口诀
-- **OOM**：先把 `CHUNK_MINITE` 每次减 2 分钟；仍 OOM 再确认并发=1，并使用 `greedy` 或将 `RNNT_BEAM_SIZE` 降到 2。
-- **太慢**：`PRESET=speed` 或适度增大 `CHUNK_MINITE`（注意显存）。
-- **质量不稳**：改 `DECODING_STRATEGY=beam` 且 `RNNT_BEAM_SIZE=4`（显存允许时）。
+#### 调优口诀（简化版）
+- **OOM**：切到 `PRESET=speed` 或设置更准确的 `GPU_VRAM_GB`。
+- **太慢**：`PRESET=speed`。
+- **质量不稳**：`PRESET=quality`（自动选择更稳参数）。
 
 #### 重载生效
 更新 `docker-compose.yml` 后执行：
@@ -317,22 +334,12 @@ environment:
 
 解释：
 - **PRESET**
-  - speed：优先速度，使用 greedy 解码，适度增大并发（高显存），分块稍大
-  - balanced（默认）：准确与速度平衡，beam 小束宽，分块适中
-  - quality：优先准确，使用 beam 解码，小并发，分块稍小
+  - speed：优先速度，使用 greedy 解码，分块/并发自动推导
+  - balanced（默认）：准确与速度平衡，默认 greedy，参数自动推导
+  - quality：优先准确，自动选择更稳参数（可能稍慢）
 - **GPU_VRAM_GB**：设置后更精确；不设置则会尝试自动探测 GPU 显存
 
-如需细调，仍可使用以下可选变量（有默认，不需要必填）：
-```yaml
-environment:
-  - CHUNK_MINITE=10
-  - MAX_CONCURRENT_INFERENCES=1
-  - GPU_MEMORY_FRACTION=0.92
-  - DECODING_STRATEGY=beam    # greedy | beam
-  - RNNT_BEAM_SIZE=4
-  - TRANSCRIBE_BATCH_SIZE=1
-  - TRANSCRIBE_NUM_WORKERS=0
-```
+进阶变量仍可用，但默认即可，不需要手动设置。
 
 说明：
 - **静音对齐切片**：在每个切片起点附近寻找最近静音边界，对齐后再裁切，尽量避免在句中间硬切导致的误识别与重复。

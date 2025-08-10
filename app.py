@@ -100,7 +100,7 @@ DENOISE_FILTER = os.environ.get(
 )
 
 # 解码策略（若模型支持）
-DECODING_STRATEGY = os.environ.get('DECODING_STRATEGY', 'beam')  # 可选: greedy, beam
+DECODING_STRATEGY = os.environ.get('DECODING_STRATEGY', 'greedy')  # 可选: greedy, beam
 RNNT_BEAM_SIZE = int(os.environ.get('RNNT_BEAM_SIZE', '4'))
 
 # Nemo 转写运行时配置（批量与DataLoader）
@@ -113,6 +113,18 @@ MIN_SUBTITLE_DURATION_SECONDS = float(os.environ.get('MIN_SUBTITLE_DURATION_SECO
 SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS = float(os.environ.get('SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS', '0.3'))
 SHORT_SUBTITLE_MIN_CHARS = int(os.environ.get('SHORT_SUBTITLE_MIN_CHARS', '6'))
 SUBTITLE_MIN_GAP_SECONDS = float(os.environ.get('SUBTITLE_MIN_GAP_SECONDS', '0.06'))
+
+# 长字幕拆分与换行（可选）
+# - 将过长/过久的字幕拆为多条；同时对每条字幕内文本进行换行，便于观看
+SPLIT_LONG_SUBTITLES = os.environ.get('SPLIT_LONG_SUBTITLES', 'true').lower() in ['true', '1', 't']
+MAX_SUBTITLE_DURATION_SECONDS = float(os.environ.get('MAX_SUBTITLE_DURATION_SECONDS', '6.0'))
+MAX_SUBTITLE_CHARS_PER_SEGMENT = int(os.environ.get('MAX_SUBTITLE_CHARS_PER_SEGMENT', '84'))  # 约两行，每行~42
+PREFERRED_LINE_LENGTH = int(os.environ.get('PREFERRED_LINE_LENGTH', '42'))
+MAX_SUBTITLE_LINES = int(os.environ.get('MAX_SUBTITLE_LINES', '2'))
+# 若为 true，尝试使用词级时间戳进行更精确的拆分（模型若未返回words则自动回退）
+ENABLE_WORD_TIMESTAMPS_FOR_SPLIT = os.environ.get('ENABLE_WORD_TIMESTAMPS_FOR_SPLIT', 'false').lower() in ['true', '1', 't']
+# 通过标点优先切分，逗号/句号/问号/感叹号/分号等
+SUBTITLE_SPLIT_PUNCTUATION = os.environ.get('SUBTITLE_SPLIT_PUNCTUATION', '。！？!?.,;；，,')
 
 # 简化配置：预设与GPU显存（GB）
 PRESET = os.environ.get('PRESET', 'balanced').lower()  # speed | balanced | quality | simple(=balanced)
@@ -732,6 +744,12 @@ def segments_to_srt(segments: list) -> str:
         start_time = format_srt_time(segment['start'])
         end_time = format_srt_time(segment['end'])
         text = segment['segment'].strip()
+        if text and PREFERRED_LINE_LENGTH > 0:
+            text = wrap_text_for_display(
+                text,
+                preferred_line_length=PREFERRED_LINE_LENGTH,
+                max_lines=MAX_SUBTITLE_LINES,
+            )
         
         if text: # 仅添加有内容的字幕
             srt_content.append(str(i + 1))
@@ -1037,7 +1055,8 @@ def transcribe_audio():
         chunk_boundaries = []
         # 仅在需要 SRT/VTT/verbose_json 时请求时间戳，减少显存与计算
         need_timestamps = response_format in ['srt', 'vtt', 'verbose_json']
-        collect_word_timestamps = response_format == 'verbose_json'
+        # 当需要进行长字幕切分且启用了基于词时间戳的切分时，也尝试收集词级时间戳
+        collect_word_timestamps = (response_format == 'verbose_json') or (SPLIT_LONG_SUBTITLES and ENABLE_WORD_TIMESTAMPS_FOR_SPLIT)
         full_text_parts = []  # 当不需要时间戳时，直接收集文本
 
         for i, (chunk_path, chunk_info) in enumerate(zip(chunk_paths, chunk_info_list)):
@@ -1140,6 +1159,20 @@ def transcribe_audio():
                 min_gap=SUBTITLE_MIN_GAP_SECONDS,
             )
             print(f"[{unique_id}] 字幕后处理完成：{before_cnt} -> {len(all_segments)} 段（最小时长 {MIN_SUBTITLE_DURATION_SECONDS}s）")
+
+        # --- 4.7. 长字幕拆分（按时长/字符数限制） ---
+        if SPLIT_LONG_SUBTITLES and all_segments:
+            before_cnt = len(all_segments)
+            all_segments = split_and_wrap_long_subtitles(
+                segments=all_segments,
+                words=all_words if collect_word_timestamps else None,
+                max_duration=MAX_SUBTITLE_DURATION_SECONDS,
+                max_chars=MAX_SUBTITLE_CHARS_PER_SEGMENT,
+                preferred_line_length=PREFERRED_LINE_LENGTH,
+                max_lines=MAX_SUBTITLE_LINES,
+                punctuation=SUBTITLE_SPLIT_PUNCTUATION,
+            )
+            print(f"[{unique_id}] 长字幕拆分完成：{before_cnt} -> {len(all_segments)} 段（最大时长 {MAX_SUBTITLE_DURATION_SECONDS}s, 最大字符 {MAX_SUBTITLE_CHARS_PER_SEGMENT}）")
 
         # --- 5. 格式化最终输出 ---
         if not all_segments:
@@ -1246,6 +1279,12 @@ def segments_to_vtt(segments: list) -> str:
         start_time = format_vtt_time(segment['start'])
         end_time = format_vtt_time(segment['end'])
         text = segment['segment'].strip()
+        if text and PREFERRED_LINE_LENGTH > 0:
+            text = wrap_text_for_display(
+                text,
+                preferred_line_length=PREFERRED_LINE_LENGTH,
+                max_lines=MAX_SUBTITLE_LINES,
+            )
         
         if text:  # 仅添加有内容的字幕
             vtt_content.append(f"{start_time} --> {end_time}")
@@ -1275,6 +1314,160 @@ def format_vtt_time(seconds: float) -> str:
     
     return f"{integer_part}.{fractional_part}"
 
+
+def wrap_text_for_display(text: str, preferred_line_length: int, max_lines: int) -> str:
+    """将单行文本按字数软换行为最多 max_lines 行，尽量在空格或标点处断行。
+    若文本超过行数限制，后续仍保留但不强制增加行数（SRT/VTT可多行）。
+    """
+    if preferred_line_length <= 0 or max_lines <= 0:
+        return text
+    import re
+    words = re.findall(r"\S+|\s+", text)
+    lines = []
+    current = ""
+    for token in words:
+        tentative = current + token
+        if len(tentative.strip()) <= preferred_line_length or not current:
+            current = tentative
+        else:
+            lines.append(current.strip())
+            current = token.lstrip()
+            if len(lines) >= max_lines - 1:
+                break
+    if current.strip():
+        lines.append(current.strip())
+    return "\n".join(lines)
+
+
+def split_and_wrap_long_subtitles(
+    segments: list,
+    words: list | None,
+    max_duration: float,
+    max_chars: int,
+    preferred_line_length: int,
+    max_lines: int,
+    punctuation: str,
+) -> list:
+    """按时长与字符数将过长字幕拆分为多条，并对每条文本进行换行。
+    - 若提供 words（词级时间戳），优先在词边界拆分；否则退化为按标点/字符切分。
+    """
+    if not segments:
+        return []
+
+    # 建立每段内的 words 索引（若提供）
+    words_by_range: list[list] = []
+    if words:
+        for seg in segments:
+            start, end = seg.get('start', 0.0), seg.get('end', 0.0)
+            seg_words = [w for w in words if w.get('start', 0.0) >= start and w.get('end', 0.0) <= end]
+            words_by_range.append(seg_words)
+    else:
+        words_by_range = [[] for _ in segments]
+
+    import re
+    punct_set = set(punctuation)
+
+    def split_points_by_chars(text: str) -> list[int]:
+        points: list[int] = []
+        last = 0
+        while last + max_chars < len(text):
+            cut = last + max_chars
+            # 尽量向左回退到最近的空格或标点
+            back = cut
+            while back > last and text[back - 1] not in punct_set and not text[back - 1].isspace():
+                back -= 1
+            if back == last:
+                back = cut
+            points.append(back)
+            last = back
+        return points
+
+    new_segments: list = []
+    for seg, seg_words in zip(segments, words_by_range):
+        start = float(seg.get('start', 0.0))
+        end = float(seg.get('end', 0.0))
+        text = str(seg.get('segment', '')).strip()
+        if not text:
+            continue
+
+        duration = max(0.0, end - start)
+        too_long_by_time = duration > max_duration
+        too_long_by_chars = len(text) > max_chars
+
+        if not too_long_by_time and not too_long_by_chars:
+            seg_copy = dict(seg)
+            seg_copy['segment'] = wrap_text_for_display(text, preferred_line_length, max_lines)
+            new_segments.append(seg_copy)
+            continue
+
+        # 计算应拆分的片段数（时间/字符双约束）
+        parts_by_time = max(1, int(math.ceil(duration / max_duration))) if max_duration > 0 else 1
+        parts_by_chars = max(1, int(math.ceil(len(text) / max_chars))) if max_chars > 0 else 1
+        parts = max(parts_by_time, parts_by_chars)
+
+        # 基于词时间戳拆分
+        if seg_words:
+            total_dur = duration if duration > 0 else 1e-6
+            target_bounds = [start + i * (total_dur / parts) for i in range(1, parts)]
+            cut_times: list[float] = []
+            for tb in target_bounds:
+                # 找到离 tb 最近的词边界
+                best_t = None
+                best_d = 1e9
+                for w in seg_words:
+                    for edge in (w.get('start', 0.0), w.get('end', 0.0)):
+                        d = abs(edge - tb)
+                        if d < best_d:
+                            best_d = d
+                            best_t = edge
+                if best_t is not None:
+                    cut_times.append(best_t)
+            cut_times = sorted(t for t in cut_times if start < t < end)
+
+            # 按 cut_times 切片
+            times = [start] + cut_times + [end]
+            # 将词按时间段分桶，并组装文本
+            for i in range(len(times) - 1):
+                s_i, e_i = times[i], times[i + 1]
+                sub_words = [w for w in seg_words if w.get('start', 0.0) >= s_i and w.get('end', 0.0) <= e_i]
+                sub_text = " ".join(w.get('word', '').strip() for w in sub_words if w.get('word'))
+                if not sub_text:
+                    # 回退到原文本的切片估计
+                    ratio_a = (s_i - start) / total_dur
+                    ratio_b = (e_i - start) / total_dur
+                    a = int(ratio_a * len(text))
+                    b = int(ratio_b * len(text))
+                    sub_text = text[a:b].strip()
+                sub_text = wrap_text_for_display(sub_text, preferred_line_length, max_lines)
+                new_segments.append({'start': s_i, 'end': e_i, 'segment': sub_text})
+            continue
+
+        # 无词级时间戳时：按字符与标点近似拆分
+        # 先按字符上限计算断点
+        points = split_points_by_chars(text) if too_long_by_chars else []
+        # 加入标点断点（句末优先）
+        for m in re.finditer(r"[。！？!?.,;；，]", text):
+            idx = m.end()
+            # 只在过长时考虑
+            if len(text) > max_chars or duration > max_duration:
+                points.append(idx)
+        points = sorted(set(p for p in points if 0 < p < len(text)))
+
+        # 根据 points 切文本，时间均分
+        stops = [0] + points + [len(text)]
+        times = [start + i * ((end - start) / (len(stops) - 1)) for i in range(len(stops))]
+        for i in range(len(stops) - 1):
+            a, b = stops[i], stops[i + 1]
+            s_i, e_i = times[i], times[i + 1]
+            sub_text = text[a:b].strip()
+            if not sub_text:
+                continue
+            sub_text = wrap_text_for_display(sub_text, preferred_line_length, max_lines)
+            new_segments.append({'start': s_i, 'end': e_i, 'segment': sub_text})
+
+    # 最终保证按开始时间排序
+    new_segments.sort(key=lambda s: (s.get('start', 0.0), s.get('end', 0.0)))
+    return new_segments
 
 def configure_decoding_strategy(model):
     """配置 NeMo 模型的解码策略（若支持）。
@@ -1481,8 +1674,7 @@ if __name__ == '__main__':
     else:  # balanced
         MAX_CONCURRENT_INFERENCES = set_if_default('MAX_CONCURRENT_INFERENCES', MAX_CONCURRENT_INFERENCES, 1)
         GPU_MEMORY_FRACTION = set_if_default('GPU_MEMORY_FRACTION', GPU_MEMORY_FRACTION, 0.92 if (gpu_vram_gb and gpu_vram_gb >= 12) else 0.90)
-        DECODING_STRATEGY = set_if_default('DECODING_STRATEGY', DECODING_STRATEGY, 'beam')
-        RNNT_BEAM_SIZE = set_if_default('RNNT_BEAM_SIZE', RNNT_BEAM_SIZE, 4)
+        DECODING_STRATEGY = set_if_default('DECODING_STRATEGY', DECODING_STRATEGY, 'greedy')
 
     # 记录最终预设
     print(f"预设: {preset}  | GPU_VRAM_GB: {gpu_vram_gb if gpu_vram_gb is not None else 'unknown'}")
