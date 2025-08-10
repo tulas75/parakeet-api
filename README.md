@@ -234,6 +234,77 @@ environment:
   - RNNT_BEAM_SIZE=4
 ```
 
+### 字幕后处理：最小时长与短字幕合并（可选）
+
+为降低“闪字幕”（显示时间过短）现象，已内置后处理，默认开启。可通过以下变量微调：
+
+- `MERGE_SHORT_SUBTITLES`：是否启用短字幕合并与延长（默认 `true`）
+- `MIN_SUBTITLE_DURATION_SECONDS`：每条字幕的最短显示时长，默认 `1.5` 秒
+- `SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`：与下一条字幕的最大可合并间隙，默认 `0.3` 秒
+- `SHORT_SUBTITLE_MIN_CHARS`：当文本字符数不超过此值时更倾向合并，默认 `6`
+- `SUBTITLE_MIN_GAP_SECONDS`：段与段之间保留的最小安全间隔，默认 `0.06` 秒
+
+推荐：若仍觉得跳动，可将 `MIN_SUBTITLE_DURATION_SECONDS` 调至 `1.8–2.2`；若误合并，略微减小 `SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`。
+
+示例（docker-compose 环境块中加入）：
+
+```yaml
+environment:
+  - MERGE_SHORT_SUBTITLES=true
+  - MIN_SUBTITLE_DURATION_SECONDS=1.8
+  - SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS=0.25
+  - SHORT_SUBTITLE_MIN_CHARS=6
+  - SUBTITLE_MIN_GAP_SECONDS=0.06
+```
+
+### 快速变量维护指南（推荐）
+
+面向大多数用户，只需维护 2–3 个变量即可：`PRESET`、`GPU_VRAM_GB`，必要时加 `CHUNK_MINITE`。其它保持默认。
+
+#### 一分钟选型
+- 4–6GB：`PRESET=speed`，`GPU_VRAM_GB=6`，`CHUNK_MINITE=3`
+- 8GB（保守安全）：`PRESET=balanced`，`GPU_VRAM_GB=8`，`CHUNK_MINITE=5`，`DECODING_STRATEGY=greedy`
+- ≥12GB：`PRESET=balanced`（或 `quality`），`GPU_VRAM_GB=12`，可不设 `CHUNK_MINITE`；若追求更稳可改 `DECODING_STRATEGY=beam` 并配合 `RNNT_BEAM_SIZE=4`
+
+#### 最小环境块（8GB 稳妥组合，复制即用）
+```yaml
+environment:
+  - PRESET=balanced        # speed | balanced | quality
+  - GPU_VRAM_GB=8          # 显存大小（整数）
+  - CHUNK_MINITE=5         # 8GB 建议 5 分钟，防止 OOM
+  - DECODING_STRATEGY=greedy
+  - MAX_CONCURRENT_INFERENCES=1
+  - TRANSCRIBE_BATCH_SIZE=1
+  - TRANSCRIBE_NUM_WORKERS=0
+  - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:96,garbage_collection_threshold:0.85
+```
+
+#### 常用变量（只看这几个）
+- **PRESET**: 一键风格。speed=更快更省显存；balanced=默认；quality=更稳但慢。
+- **GPU_VRAM_GB**: 显存大小（整数），用于自动推导其它参数。
+- **CHUNK_MINITE**: 单段转录时长，越大显存峰值越高。4–8GB 建议 3–6；8GB 推荐 5。
+- **DECODING_STRATEGY**: `greedy` 显存更低；`beam` 更稳（配合 `RNNT_BEAM_SIZE=2–6`）。
+- **MAX_CONCURRENT_INFERENCES**: 并发数。8GB 固定 1。
+- **TRANSCRIBE_BATCH_SIZE / TRANSCRIBE_NUM_WORKERS**: 建议 1 / 0 最省显存。
+- **PYTORCH_CUDA_ALLOC_CONF**: 建议保留以减少显存碎片（镜像已默认设置，显式声明可覆盖）。
+- 可选质量/连贯：`ENABLE_OVERLAP_CHUNKING=true`、`CHUNK_OVERLAP_SECONDS=30`、`ENABLE_SILENCE_ALIGNED_CHUNKING=true`。
+
+#### 调优口诀
+- **OOM**：先把 `CHUNK_MINITE` 每次减 2 分钟；仍 OOM 再确认并发=1，并使用 `greedy` 或将 `RNNT_BEAM_SIZE` 降到 2。
+- **太慢**：`PRESET=speed` 或适度增大 `CHUNK_MINITE`（注意显存）。
+- **质量不稳**：改 `DECODING_STRATEGY=beam` 且 `RNNT_BEAM_SIZE=4`（显存允许时）。
+
+#### 重载生效
+更新 `docker-compose.yml` 后执行：
+
+```bash
+docker compose down
+docker compose up -d --force-recreate
+docker logs -f parakeet-api-docker
+```
+
+日志会打印最终推导值与 GPU 总显存，便于核对。遇到 OOM 时，通常只需调整 `CHUNK_MINITE` 即可。
+
 ### 一键预设（简化环境变量，按需）
 
 最少只需要 1-2 个变量：

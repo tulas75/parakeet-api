@@ -107,6 +107,13 @@ RNNT_BEAM_SIZE = int(os.environ.get('RNNT_BEAM_SIZE', '4'))
 TRANSCRIBE_BATCH_SIZE = int(os.environ.get('TRANSCRIBE_BATCH_SIZE', '1'))
 TRANSCRIBE_NUM_WORKERS = int(os.environ.get('TRANSCRIBE_NUM_WORKERS', '0'))
 
+# 字幕后处理配置（防止字幕显示时间过短）
+MERGE_SHORT_SUBTITLES = os.environ.get('MERGE_SHORT_SUBTITLES', 'true').lower() in ['true', '1', 't']
+MIN_SUBTITLE_DURATION_SECONDS = float(os.environ.get('MIN_SUBTITLE_DURATION_SECONDS', '1.5'))
+SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS = float(os.environ.get('SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS', '0.3'))
+SHORT_SUBTITLE_MIN_CHARS = int(os.environ.get('SHORT_SUBTITLE_MIN_CHARS', '6'))
+SUBTITLE_MIN_GAP_SECONDS = float(os.environ.get('SUBTITLE_MIN_GAP_SECONDS', '0.06'))
+
 # 简化配置：预设与GPU显存（GB）
 PRESET = os.environ.get('PRESET', 'balanced').lower()  # speed | balanced | quality | simple(=balanced)
 GPU_VRAM_GB_ENV = os.environ.get('GPU_VRAM_GB', '').strip()
@@ -300,6 +307,91 @@ def merge_overlapping_segments(all_segments: list, chunk_boundaries: list, overl
         merged.append(seg)
     print(f"合并完成，最终 {len(merged)} 个segments")
     return merged
+
+def enforce_min_subtitle_duration(
+    segments: list,
+    min_duration: float,
+    merge_max_gap: float,
+    min_chars: int,
+    min_gap: float,
+) -> list:
+    """对转写的 segments 进行后处理，避免字幕显示时间过短：
+    1) 尝试将过短或文本过少的相邻段合并（两段间隙不超过 merge_max_gap）。
+    2) 若仍短于 min_duration，尽量将当前段的结束时间延长到 min_duration，但不与下一段重叠（预留 min_gap）。
+
+    segments: [{'start': float, 'end': float, 'segment': str}, ...]
+    返回：处理后的 segments（按开始时间排序，且不重叠）
+    """
+    if not segments:
+        return []
+
+    # 按开始时间排序，深拷贝以免修改原对象
+    segments_sorted = sorted(
+        [
+            {
+                'start': float(s.get('start', 0.0)),
+                'end': float(s.get('end', 0.0)),
+                'segment': str(s.get('segment', '')),
+            }
+            for s in segments
+        ],
+        key=lambda s: (s['start'], s['end'])
+    )
+
+    result: list = []
+    i = 0
+    n = len(segments_sorted)
+
+    while i < n:
+        current = segments_sorted[i]
+        current_text = current.get('segment', '').strip()
+
+        # 尝试前向合并，直到满足最短时长或无可合并对象
+        while MERGE_SHORT_SUBTITLES:
+            duration = max(0.0, current['end'] - current['start'])
+            too_short = duration < min_duration or len(current_text) <= min_chars
+            if not too_short or i + 1 >= n:
+                break
+            next_seg = segments_sorted[i + 1]
+            gap = max(0.0, next_seg['start'] - current['end'])
+            if gap > merge_max_gap:
+                break
+            # 合并到 current
+            next_text = next_seg.get('segment', '').strip()
+            current['end'] = max(current['end'], next_seg['end'])
+            current_text = (current_text + ' ' + next_text).strip()
+            current['segment'] = current_text
+            i += 1  # 吞并下一段
+        # 合并完成后，如仍短则尝试延长，但不得与下一段重叠
+        duration = max(0.0, current['end'] - current['start'])
+        if duration < min_duration:
+            desired_end = current['start'] + min_duration
+            if i + 1 < n:
+                safe_end = max(current['end'], min(desired_end, segments_sorted[i + 1]['start'] - min_gap))
+                # 只有在不会导致非法区间时才更新
+                if safe_end > current['start']:
+                    current['end'] = safe_end
+            else:
+                # 已是最后一段，直接延长
+                current['end'] = desired_end
+
+        result.append(current)
+        i += 1
+
+    # 最后再保证不重叠与单调递增
+    cleaned: list = []
+    for seg in result:
+        if not cleaned:
+            cleaned.append(seg)
+            continue
+        prev = cleaned[-1]
+        if seg['start'] < prev['end']:
+            seg['start'] = prev['end'] + min_gap
+            if seg['start'] > seg['end']:
+                seg['start'] = seg['end']
+        cleaned.append(seg)
+
+    return cleaned
 
 def process_chunk_segments(segments: list, overlap_start: float, overlap_seconds: float) -> list:
     """处理单个chunk的segments，处理重叠区域"""
@@ -1036,6 +1128,18 @@ def transcribe_audio():
             print(f"[{unique_id}] 处理重叠区域，去除重复内容...")
             all_segments = merge_overlapping_segments(all_segments, chunk_boundaries, CHUNK_OVERLAP_SECONDS)
             print(f"[{unique_id}] 重叠处理完成，最终segments数量: {len(all_segments)}")
+
+        # --- 4.6. 字幕后处理：合并/延长过短字幕，避免闪烁 ---
+        if MERGE_SHORT_SUBTITLES and all_segments:
+            before_cnt = len(all_segments)
+            all_segments = enforce_min_subtitle_duration(
+                all_segments,
+                min_duration=MIN_SUBTITLE_DURATION_SECONDS,
+                merge_max_gap=SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS,
+                min_chars=SHORT_SUBTITLE_MIN_CHARS,
+                min_gap=SUBTITLE_MIN_GAP_SECONDS,
+            )
+            print(f"[{unique_id}] 字幕后处理完成：{before_cnt} -> {len(all_segments)} 段（最小时长 {MIN_SUBTITLE_DURATION_SECONDS}s）")
 
         # --- 5. 格式化最终输出 ---
         if not all_segments:
