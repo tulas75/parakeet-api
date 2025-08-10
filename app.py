@@ -1260,6 +1260,44 @@ def safe_transcribe(model, audio_path: str, need_timestamps: bool, batch_size: i
                     pass
         # 非OOM错误原样抛出
         raise
+    except ValueError as e:
+        # 处理 NeMo TDT Beam 在开启 timestamps 时不支持 alignment preservation 的情况
+        if 'Alignment preservation has not been implemented' in str(e):
+            print("⚠️ 检测到 TDT Beam 解码不支持对齐保留，自动切换到 greedy 解码并重试一次…")
+            aggressive_memory_cleanup()
+            original_strategy = DECODING_STRATEGY
+            try:
+                # 强制切换为 greedy
+                os.environ['DECODING_STRATEGY'] = 'greedy'
+                globals()['DECODING_STRATEGY'] = 'greedy'
+                configure_decoding_strategy(model)
+                # 重试（进一步降低批量与并发）
+                if cuda_available:
+                    with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.float16):
+                        return model.transcribe(
+                            [audio_path],
+                            timestamps=need_timestamps,
+                            batch_size=1,
+                            num_workers=0,
+                        )
+                else:
+                    with torch.inference_mode():
+                        return model.transcribe(
+                            [audio_path],
+                            timestamps=need_timestamps,
+                            batch_size=1,
+                            num_workers=0,
+                        )
+            finally:
+                # 尝试恢复原策略
+                os.environ['DECODING_STRATEGY'] = original_strategy
+                globals()['DECODING_STRATEGY'] = original_strategy
+                try:
+                    configure_decoding_strategy(model)
+                except Exception:
+                    pass
+        # 其他 ValueError 继续抛出
+        raise
 
 # --- Waitress 服务器启动 ---
 if __name__ == '__main__':

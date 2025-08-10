@@ -75,13 +75,12 @@ docker-compose up --build
 
 ## 环境变量配置
 
-通过 `docker-compose.yml` 中的环境变量可以灵活配置服务行为：
+通过 `docker-compose.yml` 中的环境变量可以灵活配置服务行为（简版，推荐）：
 
 ```yaml
 environment:
-  - CHUNK_MINITE=10              # 音频分块时长（分钟），8GB显存建议10-15分钟
-  - IDLE_TIMEOUT_MINUTES=30      # 模型自动卸载超时时间（分钟），0=禁用
   - ENABLE_LAZY_LOAD=true        # 懒加载开关，true=按需加载，false=启动时预加载
+  - DECODING_STRATEGY=greedy     # 默认使用 greedy，避免 TDT Beam 在 timestamps 下的对齐限制
   - API_KEY=                     # API认证密钥，留空=不认证
 ```
 
@@ -105,9 +104,9 @@ environment:
   - 设置后，所有请求必须在 `Authorization` 头中提供 `Bearer <key>`
   - 留空则不进行身份验证
 
-### 显存优化配置
+### 全量配置（进阶，可选）
 
-新增的显存优化环境变量：
+以下为可选的完整环境变量列表（如不需要请忽略，保持简版即可）：
 
 - **AGGRESSIVE_MEMORY_CLEANUP**：激进显存清理（默认：`true`）
   - `true`：启用激进的显存清理，每个chunk处理完后立即清理
@@ -125,7 +124,7 @@ environment:
   - 用于监控和调整处理策略
   - 根据实际GPU显存调整
 
-配置示例（Docker）：
+配置示例（进阶）：
 ```yaml
 environment:
   - AGGRESSIVE_MEMORY_CLEANUP=true
@@ -134,7 +133,7 @@ environment:
   - MAX_CHUNK_MEMORY_MB=1200
 ```
 
-### Tensor Core 优化配置
+### Tensor Core 优化配置（可选）
 
 新增专门的 Tensor Core 优化环境变量：
 
@@ -190,7 +189,7 @@ environment:
 - 时间戳准确性
 - API兼容性
 
-### 句子完整性优化配置
+### 句子完整性优化配置（可选）
 
 解决分块处理中句子被截断的问题：
 
@@ -214,7 +213,7 @@ environment:
   - SENTENCE_BOUNDARY_THRESHOLD=0.5
 ```
 
-### 静音对齐与音频前处理
+### 静音对齐与音频前处理（可选）
 
 新增提升准确率的开关：
 
@@ -235,7 +234,7 @@ environment:
   - RNNT_BEAM_SIZE=4
 ```
 
-### 一键预设（简化环境变量）
+### 一键预设（简化环境变量，按需）
 
 最少只需要 1-2 个变量：
 
