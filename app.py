@@ -35,6 +35,7 @@ ENABLE_LAZY_LOAD = os.environ.get('ENABLE_LAZY_LOAD', 'true').lower() not in ['f
 # Whisper 兼容的 API Key。如果留空，则不进行身份验证。
 API_KEY = os.environ.get('API_KEY', None)
 import shutil
+from typing import Any, Dict
 import uuid
 import subprocess
 import datetime
@@ -46,7 +47,9 @@ from flask import Flask, request, jsonify, Response
 from waitress import serve
 from pathlib import Path
 # ROOT_DIR is not needed in Docker environment
-os.environ['HF_ENDPOINT']='https://hf-mirror.com'
+# 仅当未显式配置时才设置 HF 镜像（可通过环境变量覆盖）
+if 'HF_ENDPOINT' not in os.environ:
+    os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 # HF_HOME is set in the Dockerfile
 os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = 'true'
 # PATH for ffmpeg is handled by the Docker image's system PATH
@@ -57,6 +60,14 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import gc
 import psutil
+try:
+    # huggingface_hub may not be present in the editor environment; import defensively
+    from huggingface_hub import HfApi, hf_hub_download  # type: ignore
+except Exception:
+    # Provide fallbacks so static checkers and runtime in minimal environments won't crash.
+    HfApi = None  # type: ignore
+    def hf_hub_download(*args, **kwargs):
+        raise RuntimeError("huggingface_hub is not installed")
 
 # --- 全局设置与模型状态 ---
 asr_model = None
@@ -356,32 +367,33 @@ def enforce_min_subtitle_duration(
 
     while i < n:
         current = segments_sorted[i]
-        current_text = current.get('segment', '').strip()
+        current_text = str(current.get('segment', '')).strip()
 
         # 尝试前向合并，直到满足最短时长或无可合并对象
         while MERGE_SHORT_SUBTITLES:
-            duration = max(0.0, current['end'] - current['start'])
+            duration = max(0.0, float(current.get('end', 0.0)) - float(current.get('start', 0.0)))
             too_short = duration < min_duration or len(current_text) <= min_chars
             if not too_short or i + 1 >= n:
                 break
             next_seg = segments_sorted[i + 1]
-            gap = max(0.0, next_seg['start'] - current['end'])
+            gap = max(0.0, float(next_seg.get('start', 0.0)) - float(current.get('end', 0.0)))
             if gap > merge_max_gap:
                 break
             # 合并到 current
-            next_text = next_seg.get('segment', '').strip()
-            current['end'] = max(current['end'], next_seg['end'])
+            next_text = str(next_seg.get('segment', '')).strip()
+            current['end'] = max(float(current.get('end', 0.0)), float(next_seg.get('end', 0.0)))
             current_text = (current_text + ' ' + next_text).strip()
             current['segment'] = current_text
             i += 1  # 吞并下一段
         # 合并完成后，如仍短则尝试延长，但不得与下一段重叠
-        duration = max(0.0, current['end'] - current['start'])
-        if duration < min_duration:
-            desired_end = current['start'] + min_duration
+        duration = max(0.0, float(current.get('end', 0.0)) - float(current.get('start', 0.0)))
+        if duration < float(min_duration):
+            desired_end = float(current.get('start', 0.0)) + float(min_duration)
             if i + 1 < n:
-                safe_end = max(current['end'], min(desired_end, segments_sorted[i + 1]['start'] - min_gap))
+                next_start = float(segments_sorted[i + 1].get('start', 0.0))
+                safe_end = max(float(current.get('end', 0.0)), min(desired_end, next_start - float(min_gap)))
                 # 只有在不会导致非法区间时才更新
-                if safe_end > current['start']:
+                if safe_end > float(current.get('start', 0.0)):
                     current['end'] = safe_end
             else:
                 # 已是最后一段，直接延长
@@ -485,7 +497,7 @@ def check_cuda_compatibility():
     except RuntimeError as e:
         if "forward compatibility was attempted on non supported HW" in str(e):
             print("⚠️ CUDA兼容性错误: GPU硬件不支持当前CUDA版本")
-            print("这通常是因为主机的GPU驱动版本过旧，不支持容器中的CUDA 12.3版本")
+            print("这通常是因为主机的GPU驱动版本过旧，不支持容器中的CUDA 13.x 运行时")
             print("将自动切换到CPU模式运行")
         elif "CUDA" in str(e):
             print(f"⚠️ CUDA初始化失败: {e}")
@@ -592,8 +604,11 @@ def load_model_if_needed():
     with model_lock:
         if asr_model is None:
             print("="*50)
-            print("模型当前未加载，正在从磁盘加载...")
-            print("模型名称: nvidia/parakeet-tdt-0.6b-v2")
+            print("模型当前未加载，正在初始化...")
+            # 新模型默认：v3；支持通过环境变量覆盖
+            model_id = os.environ.get('MODEL_ID', 'nvidia/parakeet-tdt-0.6b-v3').strip()
+            model_local_path_env = os.environ.get('MODEL_LOCAL_PATH', '').strip()
+            print(f"首选模型: {model_id}")
             try:
                 # 首先检查CUDA兼容性
                 cuda_available = check_cuda_compatibility()
@@ -604,13 +619,16 @@ def load_model_if_needed():
                     os.makedirs(numba_cache_dir, exist_ok=True)
                     os.chmod(numba_cache_dir, 0o777)
                 
-                model_path = "/app/models/parakeet-tdt-0.6b-v2.nemo"
-                if not os.path.exists(model_path):
-                    raise FileNotFoundError(f"模型文件未找到: {model_path}，请确认 models 文件夹已正确挂载。")
+                # 本地优先策略：优先使用 MODEL_LOCAL_PATH ；否则尝试常见文件名；否则走 HF 自动下载
+                candidate_local_paths = []
+                if model_local_path_env:
+                    candidate_local_paths.append(model_local_path_env)
+                # 新版 v3 默认文件名（若用户手动下载 .nemo）
+                candidate_local_paths.append("/app/models/parakeet-tdt-0.6b-v3.nemo")
+                # 兼容旧版 v2 文件名（向后兼容）
+                candidate_local_paths.append("/app/models/parakeet-tdt-0.6b-v2.nemo")
 
-                # 检查文件权限
-                if not os.access(model_path, os.R_OK):
-                    raise PermissionError(f"无法读取模型文件: {model_path}，请检查文件权限。")
+                model_path = next((p for p in candidate_local_paths if os.path.exists(p)), None)
 
                 if cuda_available:
                     print(f"✅ 检测到兼容的CUDA环境，将使用 GPU 加速并开启半精度(FP16)优化。")
@@ -625,7 +643,39 @@ def load_model_if_needed():
                     print(f"Tensor Core 支持: {get_tensor_core_info()}")
                     
                     # 先在CPU上加载模型，然后转移到GPU并启用FP16
-                    loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=model_path, map_location=torch.device('cpu'))
+                    if model_path:
+                        # 本地 .nemo
+                        # 检查文件权限
+                        if not os.access(model_path, os.R_OK):
+                            raise PermissionError(f"无法读取模型文件: {model_path}，请检查文件权限。")
+                        print(f"从本地 .nemo 恢复: {model_path}")
+                        loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=model_path, map_location=torch.device('cpu'))
+                    else:
+                        # 从 HF 自动下载或尝试直接抓取 .nemo 文件到本地缓存目录
+                        print(f"尝试从 Hugging Face 获取模型文件: {model_id}")
+                        os.makedirs('/app/models', exist_ok=True)
+                        downloaded_path = None
+                        try:
+                            if HfApi is None:
+                                raise RuntimeError("huggingface_hub not available")
+                            api = HfApi()
+                            repo_files = api.list_repo_files(model_id)
+                            nemo_files = [f for f in repo_files if f.endswith('.nemo')]
+                            if nemo_files:
+                                target_fname = nemo_files[0]
+                                print(f"发现远端 .nemo 文件: {target_fname}，开始下载...")
+                                downloaded_path = hf_hub_download(repo_id=model_id, filename=target_fname, cache_dir='/app/models')
+                                print(f"已下载模型到: {downloaded_path}")
+                            else:
+                                print("远端仓库未发现 .nemo 文件，回退到 NeMo.from_pretrained() 方法加载")
+                        except Exception as e:
+                            print(f"尝试从 Hugging Face 获取 .nemo 失败: {e}")
+
+                        if downloaded_path and os.path.exists(downloaded_path):
+                            loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=downloaded_path, map_location=torch.device('cpu'))
+                        else:
+                            print(f"使用 NeMo 的 from_pretrained 加载模型: {model_id}")
+                            loaded_model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_id)
                     loaded_model = loaded_model.cuda()
                     loaded_model = loaded_model.half()
                     
@@ -638,7 +688,38 @@ def load_model_if_needed():
                 else:
                     print("🔄 使用 CPU 模式运行。")
                     print("注意: CPU模式下推理速度会较慢，建议使用兼容的GPU。")
-                    loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=model_path)
+                    if model_path:
+                        # 本地 .nemo
+                        if not os.access(model_path, os.R_OK):
+                            raise PermissionError(f"无法读取模型文件: {model_path}，请检查文件权限。")
+                        print(f"从本地 .nemo 恢复: {model_path}")
+                        loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=model_path)
+                    else:
+                        # 从 HF 自动下载或尝试直接抓取 .nemo 文件到本地缓存目录（CPU 分支）
+                        print(f"尝试从 Hugging Face 获取模型文件: {model_id}")
+                        os.makedirs('/app/models', exist_ok=True)
+                        downloaded_path = None
+                        try:
+                            if HfApi is None:
+                                raise RuntimeError("huggingface_hub not available")
+                            api = HfApi()
+                            repo_files = api.list_repo_files(model_id)
+                            nemo_files = [f for f in repo_files if f.endswith('.nemo')]
+                            if nemo_files:
+                                target_fname = nemo_files[0]
+                                print(f"发现远端 .nemo 文件: {target_fname}，开始下载...")
+                                downloaded_path = hf_hub_download(repo_id=model_id, filename=target_fname, cache_dir='/app/models')
+                                print(f"已下载模型到: {downloaded_path}")
+                            else:
+                                print("远端仓库未发现 .nemo 文件，回退到 NeMo.from_pretrained() 方法加载")
+                        except Exception as e:
+                            print(f"尝试从 Hugging Face 获取 .nemo 失败: {e}")
+
+                        if downloaded_path and os.path.exists(downloaded_path):
+                            loaded_model = nemo_asr.models.ASRModel.restore_from(restore_path=downloaded_path)
+                        else:
+                            print(f"使用 NeMo 的 from_pretrained 加载模型: {model_id}")
+                            loaded_model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_id)
                     loaded_model = optimize_model_for_inference(loaded_model)
                 
                 # 配置解码策略（若模型支持）
@@ -818,7 +899,7 @@ def health_check():
     """
     try:
         # 检查基本服务状态
-        health_status = {
+        health_status: Dict[str, Any] = {
             "status": "healthy",
             "timestamp": datetime.datetime.now().isoformat(),
             "service": "parakeet-api",
@@ -928,7 +1009,7 @@ def transcribe_audio():
     
     print(f"接收到请求，模型: '{model_name}', 响应格式: '{response_format}'")
 
-    original_filename = secure_filename(file.filename)
+    original_filename = secure_filename(str(file.filename or 'uploaded_file'))
     unique_id = str(uuid.uuid4())
     temp_original_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_{original_filename}")
     target_wav_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}.wav")
@@ -1124,7 +1205,18 @@ def transcribe_audio():
             else:
                 # 不需要时间戳，直接取文本
                 if isinstance(output, list) and output:
-                    full_text_parts.append(str(output[0]))
+                    # NeMo 返回的元素可能是 Hypothesis 对象，优先提取 .text 或 .segment 字段
+                    first = output[0]
+                    try:
+                        # 优先使用常见属性
+                        if hasattr(first, 'text') and first.text:
+                            full_text_parts.append(str(first.text))
+                        elif hasattr(first, 'segment') and first.segment:
+                            full_text_parts.append(str(first.segment))
+                        else:
+                            full_text_parts.append(str(first))
+                    except Exception:
+                        full_text_parts.append(str(first))
             
             # 释放临时输出引用
             try:
@@ -1175,7 +1267,9 @@ def transcribe_audio():
             print(f"[{unique_id}] 长字幕拆分完成：{before_cnt} -> {len(all_segments)} 段（最大时长 {MAX_SUBTITLE_DURATION_SECONDS}s, 最大字符 {MAX_SUBTITLE_CHARS_PER_SEGMENT}）")
 
         # --- 5. 格式化最终输出 ---
-        if not all_segments:
+        # 如果既没有时间戳段，也没有直接文本，则视为失败；
+        # 否则即使没有 segments（例如模型只返回纯文本），也应返回文本结果。
+        if not all_segments and not full_text_parts:
             return jsonify({"error": "转录失败，模型未返回任何有效内容"}), 500
 
         # 构建完整的转录文本

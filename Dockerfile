@@ -1,5 +1,5 @@
 # 使用单阶段构建，确保包安装可靠性
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
 # 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive
@@ -37,10 +37,10 @@ WORKDIR /app
 # 复制requirements.txt
 COPY requirements.txt .
 
-# 统一解析安装：从 CUDA 12.1 的 PyTorch 源获取 GPU 轮子，并同时解析 NeMo 等依赖
+# 统一解析安装：从 CUDA 13.0 的 PyTorch 源获取 GPU 轮子，并同时解析 NeMo 等依赖
 # 保留 PyPI 与 NVIDIA 源作为额外索引，避免解析缺包
 RUN python3 -m pip install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cu121 \
+    --index-url https://download.pytorch.org/whl/cu130 \
     --extra-index-url https://pypi.org/simple \
     --extra-index-url https://pypi.nvidia.com \
     torch torchaudio -r requirements.txt \

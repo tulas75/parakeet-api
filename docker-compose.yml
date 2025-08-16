@@ -6,12 +6,14 @@ services:
     ports:
       - "5092:5092"
     volumes:
-      - ./models:/app/models:ro
+      - ./models:/app/models
       - ./temp_uploads:/app/temp_uploads
     environment:
-      # 简版环境变量（更多可选项见 README.md）
+      # 精简变量（更多可选项见 README.md）
+      - MODEL_ID=nvidia/parakeet-tdt-0.6b-v3
+      # 如果你已手动下载 .nemo，可指定本地路径优先加载（可留空）
+      - MODEL_LOCAL_PATH=
       - ENABLE_LAZY_LOAD=true
-      - DECODING_STRATEGY=greedy
       - API_KEY=
     restart: unless-stopped
     deploy:

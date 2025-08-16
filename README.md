@@ -1,530 +1,233 @@
-# Parakeet-API-Docker
+# Parakeet API (Docker)
 
-> 本项目 fork 自 [jianchang512/parakeet-api](https://github.com/jianchang512/parakeet-api)，感谢原作者的贡献！
+基于 NVIDIA NeMo 的中文/多语种语音识别服务，提供与 OpenAI Whisper 兼容的 `/v1/audio/transcriptions` 接口。已打包为支持 GPU 的 Docker 镜像，可一键运行。
 
-基于 NVIDIA NeMo 的 Parakeet-tdt-0.6b-v2 语音识别 API，支持长音频分片转录，自动生成 SRT 字幕，兼容 OpenAI Whisper API，内置简洁前端上传页面。
+- 预置模型：默认 `nvidia/parakeet-tdt-0.6b-v3`
+- 支持长音频分片与重叠拼接，提供 SRT/VTT/verbose_json 等输出
+- 自动检测 CUDA 兼容性：不兼容或无 GPU 时降级 CPU 模式（速度较慢）
 
-## 主要特性
-- 支持长音频/视频自动分片转录，显存占用低
-- **FP16 半精度优化**：显存占用减少近一半，推理速度更快
-- **智能显存管理**：懒加载模式 + 自动模型卸载，空闲时释放显存
-- **激进显存优化**：动态调整chunk大小、实时清理缓存、梯度检查点
-- **可配置音频分块**：根据显存大小调整分块时长，支持更长上下文
-- **显存监控**：实时显示显存使用情况，自动进行内存管理
-- **API Key 认证**：支持 Whisper 兼容的 Bearer Token 认证
-- 输出 SRT 字幕格式，带时间戳
-- 兼容 OpenAI Whisper 语音识别 API 路由
-- 前端页面支持拖拽上传、进度显示、结果下载
-- 支持 Docker 一键部署，自动挂载模型和临时目录
-- 支持 GPU 加速（需 NVIDIA 驱动和 CUDA 环境）
- - **静音对齐切片**：目标切片边界自动对齐最近静音，避免在句中硬切
- - **可选去噪前处理**：一行开关 `ffmpeg` 温和降噪/均衡/动态范围，提升嘈杂环境识别率
- - **改进重叠去重**：更鲁棒的重叠段合并与去重，减少重复和缺字
- - **可选 Beam Search**：若模型支持，启用小规模 beam 提升解码稳定性
- - **显存利用优化**：仅按需请求时间戳、推理并发管控、可调 DataLoader/Batch、可配置 GPU 内存比例
 
-## 依赖环境
-- Python 3.10+
-- NVIDIA GPU + CUDA 12.1+（推荐 8GB+ 显存）
-- ffmpeg、ffprobe
-- 主要依赖包：
-  - numpy
-  - flask
-  - waitress
-  - torch
-  - nemo_toolkit[asr]
-  - huggingface_hub
-  - cuda-python>=12.3
+## 目录
 
-详见 `requirements.txt`
+- 快速开始（Windows PowerShell）
+- 先决条件
+- 使用预构建镜像运行
+- 从源码构建并运行
+- API 使用示例
+- 配置与环境变量
+- 端口、卷与文件结构
+- 健康检查与监控
+- 常见问题与排障
+- 许可与致谢
 
-## 快速开始
 
-### 1. 模型文件准备
-- 下载 [parakeet-tdt-0.6b-v2.nemo](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) 并放入 `models/` 目录。
-- 目录结构如下：
-  ```
-  models/
-    parakeet-tdt-0.6b-v2.nemo
-  ```
+## 快速开始（Windows PowerShell）
 
-### 2. 本地运行
-```bash
-pip install -r requirements.txt
-python app.py
-```
-- 默认监听 5092 端口。
-- 访问 http://localhost:5092 查看前端页面。
+1. 准备目录并启动容器（使用预构建镜像）
 
-### 3. Docker 部署
-#### 构建镜像
-```bash
-docker build -t parakeet-api .
-```
-#### 运行容器
-```bash
-docker run --gpus all -p 5092:5092 \
-  -v $PWD/models:/app/models \
-  -v $PWD/temp_uploads:/app/temp_uploads \
-  parakeet-api
-```
-#### 或使用 docker-compose
-```bash
-docker-compose up --build
+```powershell
+# 在仓库根目录执行
+mkdir .\models -Force; mkdir .\temp_uploads -Force
+
+# 启动（需要已安装 NVIDIA Container Toolkit）
+docker compose up -d
+
+# 查看日志（可选）
+docker compose logs -f
 ```
 
-## 环境变量配置
+1. 健康检查
 
-通过 `docker-compose.yml` 中的环境变量可以灵活配置服务行为（简版，推荐）：
+- 简单健康：`http://localhost:5092/health/simple`
+- 详细健康：`http://localhost:5092/health`
 
-```yaml
-environment:
-  - ENABLE_LAZY_LOAD=true        # 懒加载开关，true=按需加载，false=启动时预加载
-  - DECODING_STRATEGY=greedy     # 默认使用 greedy，避免 TDT Beam 在 timestamps 下的对齐限制
-  - API_KEY=                     # API认证密钥，留空=不认证
+1. 试用 API（示例：JSON 文本输出）
+
+```powershell
+# 使用 curl.exe（建议在 PowerShell 下显式调用 curl.exe）
+$audio = "C:\\path\\to\\audio.mp3"
+curl.exe -X POST "http://localhost:5092/v1/audio/transcriptions" \
+  -F "file=@$audio" \
+  -F "model=whisper-1" \
+  -F "response_format=json"
 ```
 
-### 配置说明
+> 如启用 API Key，需添加 `-H "Authorization: Bearer YOUR_API_KEY"`。
 
-- **CHUNK_MINITE**：控制长音频的分块大小
-  - 8GB 显存推荐：5-8 分钟
-  - 更大的分块可以减少处理开销，但需要更多显存
 
-- **IDLE_TIMEOUT_MINUTES**：模型自动卸载时间
-  - 服务空闲超过此时间后，模型将从显存中卸载
-  - 设置为 0 禁用自动卸载功能
-  - 适合间歇性使用场景，节省显存资源
+## 先决条件
 
-- **ENABLE_LAZY_LOAD**：懒加载模式
-  - `true`：服务启动时不占用显存，首次请求时才加载模型
-  - `false`：服务启动时立即加载模型到显存
-  - 懒加载适合资源共享环境，预加载适合高并发场景
+- 操作系统：Linux/Windows（本文示例以 Windows PowerShell 为主）
+- Docker：Docker Desktop 或 Docker Engine（Compose V2）
+- GPU（可选但推荐）：
+  - 已安装 NVIDIA 显卡与驱动（建议 535+），并安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+  - 镜像基于 `nvidia/cuda:13.0.0-runtime-ubuntu22.04`，需满足对应驱动要求
 
-- **API_KEY**：API 认证
-  - 设置后，所有请求必须在 `Authorization` 头中提供 `Bearer <key>`
-  - 留空则不进行身份验证
+无 GPU 时也可运行（自动 CPU 模式），但推理速度会显著降低。
 
-### 全量配置（进阶，可选）
 
-以下为可选的完整环境变量列表（如不需要请忽略，保持简版即可）：
+## 使用预构建镜像运行
 
-- **AGGRESSIVE_MEMORY_CLEANUP**：激进显存清理（默认：`true`）
-  - `true`：启用激进的显存清理，每个chunk处理完后立即清理
-  - `false`：使用标准清理策略，可能占用更多显存但性能稍好
+项目已提供 `docker-compose.yml`，默认拉取镜像 `ghcr.io/fqscfqj/parakeet-api-docker:full`。
 
-- **ENABLE_GRADIENT_CHECKPOINTING**：梯度检查点（默认：`true`）
-  - `true`：启用梯度检查点，显著降低显存占用
-  - `false`：禁用梯度检查点，可能占用更多显存
-
-- **FORCE_CLEANUP_THRESHOLD**：强制清理阈值（默认：`0.8`）
-  - 显存使用超过此比例时强制清理
-  - 范围：0.0-1.0，例如 0.8 表示 80%
-
-- **MAX_CHUNK_MEMORY_MB**：单chunk最大显存占用（默认：`1500`MB）
-  - 用于监控和调整处理策略
-  - 根据实际GPU显存调整
-
-配置示例（进阶）：
-```yaml
-environment:
-  - AGGRESSIVE_MEMORY_CLEANUP=true
-  - ENABLE_GRADIENT_CHECKPOINTING=true  
-  - FORCE_CLEANUP_THRESHOLD=0.7
-  - MAX_CHUNK_MEMORY_MB=1200
+```powershell
+mkdir .\models -Force; mkdir .\temp_uploads -Force
+docker compose up -d
+# 更新镜像
+# docker compose pull; docker compose up -d
 ```
 
-### Tensor Core 优化配置（可选）
+Compose 主要配置：
 
-新增专门的 Tensor Core 优化环境变量：
+- 端口映射：`5092:5092`
+- 卷：
+  - `./models:/app/models`（模型与缓存）
+  - `./temp_uploads:/app/temp_uploads`（临时转码与切片文件）
+- GPU：通过 `deploy.resources.reservations.devices` 申请全部可用 GPU
 
-- **ENABLE_TENSOR_CORE**：启用Tensor Core（默认：`true`）
-  - `true`：启用TF32和Tensor Core优化，大幅提升FP16推理速度
-  - `false`：禁用Tensor Core，使用传统CUDA核心
 
-- **ENABLE_CUDNN_BENCHMARK**：cuDNN基准测试（默认：`true`）
-  - `true`：启用cuDNN自动调优，首次运行较慢但后续更快
-  - `false`：禁用自动调优，确保结果完全一致
+## 从源码构建并运行
 
-- **TENSOR_CORE_PRECISION**：Tensor Core精度模式（默认：`highest`）
-  - `highest`：最高精度，适合对准确度要求极高的场景
-  - `high`：高精度，平衡精度和性能  
-  - `medium`：中等精度，最大化性能
+如果需要定制 Dockerfile 或加速国内构建，可用 `docker-compose-build.yml`：
 
-配置示例（Docker）：
-```yaml
-environment:
-  - ENABLE_TENSOR_CORE=true
-  - ENABLE_CUDNN_BENCHMARK=true
-  - TENSOR_CORE_PRECISION=high
+```powershell
+mkdir .\models -Force; mkdir .\temp_uploads -Force
+docker compose -f docker-compose-build.yml up -d --build
 ```
 
-### GPU 兼容性说明
+构建镜像包含：
 
-**完全支持 Tensor Core:**
-- RTX 20/30/40 系列 (Turing/Ampere/Ada)
-- Tesla V100, A100, H100
-- Quadro RTX 系列
-- 计算能力 ≥ 7.0
+- Python3.10 + Pip
+- PyTorch/cu130 + torchaudio（来自官方 CUDA 13.0 轮子）
+- NeMo ASR 及依赖、FFmpeg、健康检查脚本
 
-**部分支持:**  
-- GTX 16 系列 (有限的Tensor操作)
-- Tesla P100 (计算能力 6.0)
 
-**不支持:**
-- GTX 10 系列及更早
-- 计算能力 < 6.0
+## API 使用示例
 
-### 显存占用优化效果
+- 端点：`POST /v1/audio/transcriptions`
+- 字段（multipart/form-data）：
+  - `file`：音/视频文件
+  - `model`：兼容字段，默认 `whisper-1`
+  - `response_format`：`json` | `text` | `srt` | `vtt` | `verbose_json`
+  - `language`：可选，默认自动
+  - `prompt`、`temperature`：可选
 
-通过这些优化，8分钟音频段的显存占用从原来的8GB降低到约2-3GB，同时：
+示例：返回 SRT 字幕
 
-**性能提升：**
-- Tensor Core 加速：2-4x FP16推理速度提升
-- cuDNN 优化：10-20% 额外性能提升  
-- 内存优化：60-70% 显存占用减少
-
-**保持质量：**
-- FP16半精度推理精度
-- 上下文连贯性
-- 时间戳准确性
-- API兼容性
-
-### 句子完整性优化配置（可选）
-
-解决分块处理中句子被截断的问题：
-
-- **ENABLE_OVERLAP_CHUNKING**：重叠分割（默认：`true`）
-  - `true`：启用重叠分割，确保句子完整性
-  - `false`：使用传统硬分割，可能截断句子
-
-- **CHUNK_OVERLAP_SECONDS**：重叠时长（默认：`30`秒）
-  - 每个chunk之间的重叠时间
-  - 更长重叠提供更好的上下文，但增加计算量
-
-- **SENTENCE_BOUNDARY_THRESHOLD**：句子边界阈值（默认：`0.5`）
-  - 用于检测最佳分割点的时间容忍度
-  - 较小值提供更精确的句子边界检测
-
-配置示例（Docker）：
-```yaml
-environment:
-  - ENABLE_OVERLAP_CHUNKING=true
-  - CHUNK_OVERLAP_SECONDS=30
-  - SENTENCE_BOUNDARY_THRESHOLD=0.5
-```
-
-### 静音对齐与音频前处理（可选）
-
-新增提升准确率的开关：
-
-```yaml
-environment:
-  # 静音对齐切片（默认启用）
-  - ENABLE_SILENCE_ALIGNED_CHUNKING=true
-  - SILENCE_THRESHOLD_DB=-38dB        # 静音判定阈值（dB），绝对值越大越容易判静音
-  - MIN_SILENCE_DURATION=0.35         # 静音最小时长（秒）
-  - SILENCE_MAX_SHIFT_SECONDS=2.0     # 分割点向静音对齐的最大偏移（秒）
-
-  # ffmpeg 预处理（默认关闭）
-  - ENABLE_FFMPEG_DENOISE=false
-  - DENOISE_FILTER=afftdn=nf=-25,highpass=f=50,lowpass=f=8000,dynaudnorm=m=7:s=5
-
-  # 解码策略（若模型支持）
-  - DECODING_STRATEGY=beam            # greedy | beam
-  - RNNT_BEAM_SIZE=4
-```
-
-### 字幕后处理：最小时长与短字幕合并（可选）
-
-为降低“闪字幕”（显示时间过短）现象，已内置后处理，默认开启。可通过以下变量微调：
-
-- `MERGE_SHORT_SUBTITLES`：是否启用短字幕合并与延长（默认 `true`）
-- `MIN_SUBTITLE_DURATION_SECONDS`：每条字幕的最短显示时长，默认 `1.5` 秒
-- `SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`：与下一条字幕的最大可合并间隙，默认 `0.3` 秒
-- `SHORT_SUBTITLE_MIN_CHARS`：当文本字符数不超过此值时更倾向合并，默认 `6`
-- `SUBTITLE_MIN_GAP_SECONDS`：段与段之间保留的最小安全间隔，默认 `0.06` 秒
-
-推荐：若仍觉得跳动，可将 `MIN_SUBTITLE_DURATION_SECONDS` 调至 `1.8–2.2`；若误合并，略微减小 `SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`。
-
-示例（docker-compose 环境块中加入）：
-
-```yaml
-environment:
-  - MERGE_SHORT_SUBTITLES=true
-  - MIN_SUBTITLE_DURATION_SECONDS=1.8
-  - SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS=0.25
-  - SHORT_SUBTITLE_MIN_CHARS=6
-  - SUBTITLE_MIN_GAP_SECONDS=0.06
-```
-
-### 字幕长度优化：长字幕自动拆分与换行（可选）
-
-当出现“识别出的单条字幕过长”的情况（时长或字符数过长），可以启用以下变量进行拆分与美化：
-
-- `SPLIT_LONG_SUBTITLES`：是否启用长字幕拆分与换行（默认 `true`）
-- `MAX_SUBTITLE_DURATION_SECONDS`：单条字幕允许的最大时长（默认 `6.0` 秒）
-- `MAX_SUBTITLE_CHARS_PER_SEGMENT`：单条字幕允许的最大字符数（默认 `84`，约两行每行 42 字符）
-- `PREFERRED_LINE_LENGTH`：换行时的目标行宽（默认 `42` 字符）
-- `MAX_SUBTITLE_LINES`：每条字幕最多换成多少行（默认 `2`）
-- `ENABLE_WORD_TIMESTAMPS_FOR_SPLIT`：优先使用词级时间戳精确切分（默认 `false`；仅当 `response_format` 不是 `verbose_json` 时才会额外请求词时间戳）
-- `SUBTITLE_SPLIT_PUNCTUATION`：切分时优先考虑的标点集合（默认 `。！？!?.,;；，,`）
-
-推荐配置（将字幕控制在 2 行以内；单条不超过 6 秒或 84 字符）：
-
-```yaml
-environment:
-  - SPLIT_LONG_SUBTITLES=true
-  - MAX_SUBTITLE_DURATION_SECONDS=6.0
-  - MAX_SUBTITLE_CHARS_PER_SEGMENT=84
-  - PREFERRED_LINE_LENGTH=42
-  - MAX_SUBTITLE_LINES=2
-  # 若想更精细按词切开，可开启：
-  # - ENABLE_WORD_TIMESTAMPS_FOR_SPLIT=true
-```
-
-### 快速变量维护指南（推荐）
-
-面向大多数用户，只需维护 1–2 个变量即可：`PRESET`、`GPU_VRAM_GB`。其它保持默认。
-
-#### 一分钟选型
-- 4–6GB：`PRESET=speed`，`GPU_VRAM_GB=6`
-- 8GB（推荐）：`PRESET=balanced`，`GPU_VRAM_GB=8`
-- ≥12GB：`PRESET=balanced`（或 `quality`），`GPU_VRAM_GB=12`
-
-#### 最小环境块（8GB 稳妥组合，复制即用）
-```yaml
-environment:
-  - PRESET=balanced        # speed | balanced | quality
-  - GPU_VRAM_GB=8          # 显存大小（整数）
-  # 可选
-  - ENABLE_LAZY_LOAD=true
-  - API_KEY=
-```
-
-#### 常用变量（仅关注）
-- **PRESET**: 一键风格。`speed`=更快省显存；`balanced`=默认；`quality`=更稳但慢。
-- **GPU_VRAM_GB**: 显存大小（整数），用于自动推导其它参数。
-- （可选）**ENABLE_LAZY_LOAD**、**API_KEY**。
-
-#### 调优口诀（简化版）
-- **OOM**：切到 `PRESET=speed` 或设置更准确的 `GPU_VRAM_GB`。
-- **太慢**：`PRESET=speed`。
-- **质量不稳**：`PRESET=quality`（自动选择更稳参数）。
-
-#### 重载生效
-更新 `docker-compose.yml` 后执行：
-
-```bash
-docker compose down
-docker compose up -d --force-recreate
-docker logs -f parakeet-api-docker
-```
-
-日志会打印最终推导值与 GPU 总显存，便于核对。遇到 OOM 时，通常只需调整 `CHUNK_MINITE` 即可。
-
-### 一键预设（简化环境变量，按需）
-
-最少只需要 1-2 个变量：
-
-```yaml
-environment:
-  - PRESET=balanced          # speed | balanced | quality
-  - GPU_VRAM_GB=8           # 可选，设置你显卡显存（GB），不填则自动探测
-```
-
-解释：
-- **PRESET**
-  - speed：优先速度，使用 greedy 解码，分块/并发自动推导
-  - balanced（默认）：准确与速度平衡，默认 greedy，参数自动推导
-  - quality：优先准确，自动选择更稳参数（可能稍慢）
-- **GPU_VRAM_GB**：设置后更精确；不设置则会尝试自动探测 GPU 显存
-
-进阶变量仍可用，但默认即可，不需要手动设置。
-
-说明：
-- **静音对齐切片**：在每个切片起点附近寻找最近静音边界，对齐后再裁切，尽量避免在句中间硬切导致的误识别与重复。
-- **DENOISE_FILTER**：默认是一组较温和的降噪/滤波/动态范围归一参数，建议在嘈杂环境或强底噪场景开启。
-- **Beam Search**：对支持 `change_decoding_strategy` 的 NeMo 模型生效，`beam_size` 建议 2-6 之间平衡延迟与质量。
-
-### 句子完整性原理
-
-**问题：** 传统硬分割可能在句子中间切断音频，导致：
-- 句子前半部分在chunk1末尾被截断
-- 句子后半部分在chunk2开头丢失上下文
-- 影响转录准确性和连贯性
-
-**解决方案：**
-1. **重叠分割**：每个chunk包含前一个chunk的最后30秒
-2. **句子边界检测**：在重叠区域寻找句子结束点
-3. **智能合并**：去除重叠区域的重复内容，保持句子完整
-
-**优势：**
-- ✅ 保证句子完整性
-- ✅ 维持上下文连贯性  
-- ✅ 提高转录准确率
-- ✅ 保持时间戳精确性
-- ⚠️ 轻微增加计算开销（约10-15%）
-
-## 权限配置
-
-现在可以通过 `docker-compose.yml` 中的环境变量来配置用户权限：
-
-```yaml
-environment:
-  - PUID=1000  # 用户ID
-  - PGID=1000  # 组ID
-```
-
-### 如何设置正确的 UID/GID
-
-#### Windows 用户
-通常使用默认值即可：
-```yaml
-- PUID=1000
-- PGID=1000
-```
-
-#### Linux 用户
-1. 查看模型文件的所有者：
-   ```bash
-   ls -la models/parakeet-tdt-0.6b-v2.nemo
-   ```
-2. 输出示例：
-   ```
-   -rw-r--r-- 1 1001 1001 2.1G Jul 16 10:00 parakeet-tdt-0.6b-v2.nemo
-   ```
-3. 设置对应的 UID/GID：
-   ```yaml
-   - PUID=1001
-   - PGID=1001
-   ```
-
-### 完整的 docker-compose.yml 示例
-
-```yaml
-version: '3.8'
-services:
-  parakeet-api-docker:
-    container_name: parakeet-api-docker
-    build: 
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "5092:5092"
-    volumes:
-      - ./models:/app/models:ro
-      - ./temp_uploads:/app/temp_uploads
-    environment:
-      - CHUNK_MINITE=10
-      - IDLE_TIMEOUT_MINUTES=30
-      - ENABLE_LAZY_LOAD=true
-      - API_KEY=
-      - PUID=1000    # 根据需要修改
-      - PGID=1000    # 根据需要修改
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-```
-
-
-### 权限配置使用步骤
-
-1. 将模型文件放置在 `models/parakeet-tdt-0.6b-v2.nemo`
-2. 根据需要修改 `docker-compose.yml` 中的 `PUID` 和 `PGID`
-3. 运行：`docker-compose up --build`
-
-容器启动时会显示：
-```
-配置用户权限: UID=1000, GID=1000
-调整appuser UID从 999 到 1000
-调整appuser GID从 999 到 1000
-```
-
-## API 说明
-### 语音转录接口
-- 路由：`POST /v1/audio/transcriptions`
-- 参数：
-  - `file`：音频或视频文件（form-data，必需）
-  - `model`：模型名称（可选，默认 `whisper-1`）
-  - `response_format`：响应格式（可选，默认 `json`）
-    - `json`：标准 JSON 格式，包含 `text` 字段
-    - `text`：纯文本格式
-    - `srt`：SRT 字幕格式
-    - `vtt`：VTT 字幕格式
-    - `verbose_json`：详细 JSON 格式，包含分段信息
-  - `language`：音频语言（可选，如 `en`）
-  - `prompt`：提示文本（可选）
-  - `temperature`：采样温度（可选，默认 0）
-- 返回：根据 `response_format` 返回相应格式
-- 完全兼容 OpenAI Whisper API 调用方式
-
-### API 调用示例
-
-#### 基本调用（无认证）
-```bash
-# 基本调用（返回 JSON）
-curl -X POST http://localhost:5092/v1/audio/transcriptions \
-  -F "file=@audio.wav" \
-  -F "model=whisper-1"
-
-# 获取 SRT 字幕
-curl -X POST http://localhost:5092/v1/audio/transcriptions \
-  -F "file=@audio.wav" \
+```powershell
+$audio = "C:\\path\\to\\audio.wav"
+curl.exe -X POST "http://localhost:5092/v1/audio/transcriptions" \
+  -F "file=@$audio" \
   -F "model=whisper-1" \
   -F "response_format=srt"
-
-# 详细 JSON 格式（包含分段）
-curl -X POST http://localhost:5092/v1/audio/transcriptions \
-  -F "file=@audio.wav" \
-  -F "model=whisper-1" \
-  -F "response_format=verbose_json"
 ```
 
-#### 带 API Key 认证
-```bash
-# 设置 API_KEY=your-secret-key 后的调用方式
-curl -X POST http://localhost:5092/v1/audio/transcriptions \
-  -H "Authorization: Bearer your-secret-key" \
-  -F "file=@audio.wav" \
-  -F "model=whisper-1"
+启用 API Key：
+
+```powershell
+# 在 docker-compose.yml 中设置环境变量 API_KEY 后，调用时带上 Header
+$audio = "C:\\path\\to\\audio.mp3"
+$apiKey = "YOUR_API_KEY"
+curl.exe -X POST "http://localhost:5092/v1/audio/transcriptions" \
+  -H "Authorization: Bearer $apiKey" \
+  -F "file=@$audio" -F "response_format=json"
 ```
 
-### 前端页面
-- 访问 `/`，可上传音视频文件，自动转录并下载 SRT 字幕
-- 支持拖拽、进度显示、结果预览与下载
 
-## 性能优化
+## 配置与环境变量
 
-### 显存优化
-- **FP16 半精度**：自动启用，显存占用减少约 50%
-- **分块处理**：长音频自动分片，避免显存峰值过高
-- **即时清理**：每个分块处理后立即清理显存缓存
-- **懒加载**：按需加载模型，空闲时自动卸载
+常用环境变量（可在 Compose 的 `environment:` 中设置）：
 
-### 推荐配置
-- **8GB 显存**：`CHUNK_MINITE=15`, `IDLE_TIMEOUT_MINUTES=30`
-- **4GB 显存**：`CHUNK_MINITE=8`, `IDLE_TIMEOUT_MINUTES=15`
-- **高并发场景**：`ENABLE_LAZY_LOAD=false`
-- **资源共享**：`ENABLE_LAZY_LOAD=true`, `IDLE_TIMEOUT_MINUTES=10`
+- 模型与加载
+  - `MODEL_ID`：默认 `nvidia/parakeet-tdt-0.6b-v3`
+  - `MODEL_LOCAL_PATH`：优先加载本地 `.nemo` 文件路径（挂载到 `./models` 后可指向 `/app/models/xxx.nemo`）
+  - `ENABLE_LAZY_LOAD`：是否懒加载模型（默认 `true`）
+  - `IDLE_TIMEOUT_MINUTES`：闲置自动卸载模型的分钟数，`0` 表示禁用（默认 `30`）
+  - `API_KEY`：若设置，则启用 Bearer Token 认证
+  - `HF_ENDPOINT`：Hugging Face 镜像端点，默认 `https://hf-mirror.com`
 
-## 目录结构
-```
-├── app.py                # 主程序，Flask + NeMo ASR
-├── requirements.txt      # 依赖列表
-├── Dockerfile            # Docker 镜像构建文件
-├── docker-compose.yml    # Docker Compose 部署
-├── models/               # 存放 .nemo 模型文件
-└── LICENSE               # MIT 开源协议
-```
+- 性能与显存
+  - `PRESET`：`speed` | `balanced` | `quality` | `simple`（=balanced）。用于在启动时推导参数
+  - `GPU_VRAM_GB`：显存容量（整数，GB）。若不设置，会尝试自动检测
+  - `CHUNK_MINITE`：每段切片时长（分钟，默认 `10`，显存小可调小）
+  - `MAX_CONCURRENT_INFERENCES`：最大并发推理数（默认 `1`）
+  - `GPU_MEMORY_FRACTION`：单进程可使用的显存比例（默认 `0.90~0.95`）
+  - `DECODING_STRATEGY`：`greedy` | `beam`，`RNNT_BEAM_SIZE`：Beam 宽度
+  - `AGGRESSIVE_MEMORY_CLEANUP`：激进显存清理（默认 `true`）
+  - `ENABLE_TENSOR_CORE`、`ENABLE_CUDNN_BENCHMARK`、`TENSOR_CORE_PRECISION`：Tensor Core/Benchmark 相关
 
-## 开源协议
+- 切片与句子完整性
+  - `ENABLE_OVERLAP_CHUNKING`：重叠切片（默认 `true`），`CHUNK_OVERLAP_SECONDS`：重叠秒数（默认 `30`）
+  - `ENABLE_SILENCE_ALIGNED_CHUNKING`：静音对齐分割（默认 `true`）
+  - `SILENCE_THRESHOLD_DB`（默认 `-38dB`）、`MIN_SILENCE_DURATION`（默认 `0.35`）、`SILENCE_MAX_SHIFT_SECONDS`（默认 `2.0`）
 
-本项目基于 MIT License 开源，详见 LICENSE 文件。
+- 字幕后处理与换行
+  - `MERGE_SHORT_SUBTITLES`（默认 `true`）、`MIN_SUBTITLE_DURATION_SECONDS`（默认 `1.5`）
+  - `SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`、`SHORT_SUBTITLE_MIN_CHARS`、`SUBTITLE_MIN_GAP_SECONDS`
+  - `SPLIT_LONG_SUBTITLES`（默认 `true`）、`MAX_SUBTITLE_DURATION_SECONDS`（默认 `6.0`）
+  - `MAX_SUBTITLE_CHARS_PER_SEGMENT`（默认 `84`）、`PREFERRED_LINE_LENGTH`（默认 `42`）、`MAX_SUBTITLE_LINES`（默认 `2`）
+  - `ENABLE_WORD_TIMESTAMPS_FOR_SPLIT`（默认 `false`）
+
+- 其他
+  - `ENABLE_FFMPEG_DENOISE`（默认 `false`）、`DENOISE_FILTER`：FFmpeg 去噪/均衡/动态范围预处理
+  - `NUMBA_CACHE_DIR`（默认 `/tmp/numba_cache`）：已在镜像中处理并赋予权限
+  - `PUID` / `PGID`：容器启动时会将运行用户切换为指定 UID/GID，便于卷权限管理
+
+> 小贴士：如果只是“能用就行”，先保留默认值；如遇显存不足，可降低 `CHUNK_MINITE`、设为 `PRESET=quality` 或将 `DECODING_STRATEGY=greedy`。
+
+
+## 端口、卷与文件结构
+
+- 端口：容器内监听 `5092`，可在 Compose 中改为其他宿主端口
+- 卷：
+  - `./models:/app/models`：保存/缓存模型（优先加载 `.nemo`）
+  - `./temp_uploads:/app/temp_uploads`：临时转码与切片数据
+- 关键文件：
+  - `app.py`：Flask + Waitress 服务，提供 API 与切片/后处理逻辑
+  - `Dockerfile`：CUDA 13.0 运行时 + 依赖安装 + 健康检查 + 启动脚本
+  - `docker-compose.yml`：使用预构建镜像
+  - `docker-compose-build.yml`：本地构建
+  - `healthcheck.sh`：容器健康检查脚本
+
+
+## 健康检查与监控
+
+- `/health/simple`：返回 200 表示存活
+- `/health`：返回 JSON，包含 GPU/CPU、内存与模型加载状态等
+- 容器内置 `HEALTHCHECK`，Compose/编排平台可据此做重启策略
+
+
+## 常见问题与排障（FAQ）
+
+- 问：日志提示 “CUDA 不可用/兼容性错误”，服务退回 CPU？
+  - 答：检查主机 NVIDIA 驱动是否满足 CUDA 13.x 运行时需求；确认已安装 NVIDIA Container Toolkit；Compose 中 device 预留是否生效。无法满足时可继续用 CPU，但速度会慢。
+
+- 问：首次启动加载模型很慢或失败？
+  - 答：默认从 Hugging Face 拉取，可设置 `MODEL_LOCAL_PATH` 指向本地 `.nemo`；或配置 `HF_ENDPOINT` 使用镜像。确保 `./models` 卷可写。
+
+- 问：显存不足/频繁 OOM？
+  - 答：将 `CHUNK_MINITE` 调小（如 6~8）；将 `DECODING_STRATEGY=greedy`；`PRESET=quality` 会自动调低并发与显存占比；必要时关闭 `ENABLE_OVERLAP_CHUNKING`。
+
+- 问：返回的字幕太碎或闪烁？
+  - 答：可调 `MIN_SUBTITLE_DURATION_SECONDS`、`SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`、`SHORT_SUBTITLE_MIN_CHARS`；或关闭 `MERGE_SHORT_SUBTITLES=false`。
+
+- 问：端口冲突？
+  - 答：修改 Compose 的 `ports` 映射，例如 `"18080:5092"`。
+
+- 问：权限问题（Windows 卷）？
+  - 答：可通过设置 `PUID` / `PGID`（Linux 更常用）或确保 Docker Desktop 共享磁盘权限正常。遇到权限受限时，删除卷目录后重建也可缓解。
+
+
+## 许可与致谢
+
+- 本项目：见 `LICENSE`
+- 模型与依赖：NVIDIA NeMo（ASR）、PyTorch、FFmpeg、Hugging Face 等开源生态
+
 
 ---
+完成度与验证
 
-如有问题欢迎提交 issue 或 PR。 
+- 构建：Docker/Compose 清单已就绪
+- 运行：提供 GPU/CPU 双路径与健康检查
+- 用法：给出 PowerShell 友好命令与 curl 示例
+- 覆盖需求：已新增用户友好 README（本文件）
