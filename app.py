@@ -75,6 +75,11 @@ last_request_time = None
 model_lock = threading.Lock()
 cuda_available = False  # 全局CUDA兼容性标志
 
+# 受支持的语言（ISO 639-1，两字母小写），基于 parakeet-tdt-0.6b-v3 公告
+SUPPORTED_LANG_CODES = {
+    'bg','hr','cs','da','nl','en','et','fi','fr','de','el','hu','it','lv','lt','mt','pl','pt','ro','sk','sl','es','sv','ru','uk'
+}
+
 # 推理并发控制（避免多请求同时占用显存导致 OOM）
 MAX_CONCURRENT_INFERENCES = int(os.environ.get('MAX_CONCURRENT_INFERENCES', '1'))
 inference_semaphore = threading.Semaphore(MAX_CONCURRENT_INFERENCES)
@@ -1008,6 +1013,23 @@ def transcribe_audio():
     temperature = float(request.form.get('temperature', 0))
     
     print(f"接收到请求，模型: '{model_name}', 响应格式: '{response_format}'")
+
+    # --- 0.5 语言白名单校验（Whisper 兼容行为）---
+    # 若客户端显式传入 language，我们只接受受支持的 25 种语言，否则直接拒绝
+    if language:
+        lang_norm = str(language).strip().lower().replace('_', '-')
+        # 兼容像 "en-US" 这种区域码：只取主语言部分
+        primary = lang_norm.split('-')[0]
+        if primary not in SUPPORTED_LANG_CODES:
+            # 与 Whisper 的风格保持一致：返回 400，并在 message 中提示不支持
+            return jsonify({
+                "error": {
+                    "message": f"Unsupported language: {language}",
+                    "type": "invalid_request_error",
+                    "param": "language",
+                    "code": "unsupported_language"
+                }
+            }), 400
 
     original_filename = secure_filename(str(file.filename or 'uploaded_file'))
     unique_id = str(uuid.uuid4())
