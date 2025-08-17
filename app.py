@@ -54,6 +54,10 @@ if 'HF_ENDPOINT' not in os.environ:
 os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = 'true'
 # PATH for ffmpeg is handled by the Docker image's system PATH
 
+# 减少 PyTorch CUDA 分配碎片，降低 OOM 几率（可通过外部环境变量覆盖）
+if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:128'
+
 import nemo.collections.asr as nemo_asr  # type: ignore
 import torch
 import torch.nn as nn
@@ -745,6 +749,56 @@ def load_model_if_needed():
                 raise e
     return asr_model
 
+def predownload_model_artifacts():
+    """在后台下载模型文件到本地缓存目录，但不加载到内存。
+    这个函数用于在启用懒加载时提前把大文件拉取到 `/app/models`，以缩短后续首次加载延时。
+    """
+    try:
+        model_id = os.environ.get('MODEL_ID', 'nvidia/parakeet-tdt-0.6b-v3').strip()
+        model_local_path_env = os.environ.get('MODEL_LOCAL_PATH', '').strip()
+        print(f"[predownload] 启动模型预下载检查: {model_id}")
+
+        # 本地优先：如果已存在本地文件则无需下载
+        candidate_local_paths = []
+        if model_local_path_env:
+            candidate_local_paths.append(model_local_path_env)
+        candidate_local_paths.append('/app/models/parakeet-tdt-0.6b-v3.nemo')
+        candidate_local_paths.append('/app/models/parakeet-tdt-0.6b-v2.nemo')
+        for p in candidate_local_paths:
+            if p and os.path.exists(p):
+                print(f"[predownload] 发现本地模型文件，无需下载: {p}")
+                return
+
+        # 创建缓存目录
+        os.makedirs('/app/models', exist_ok=True)
+
+        # 尝试使用 huggingface_hub 下载远端 .nemo 文件（仅下载，不恢复/加载）
+        if HfApi is None:
+            print("[predownload] huggingface_hub 不可用，跳过预下载")
+            return
+
+        try:
+            api = HfApi()
+            repo_files = api.list_repo_files(model_id)
+            nemo_files = [f for f in repo_files if f.endswith('.nemo')]
+            if not nemo_files:
+                print(f"[predownload] 远端仓库未发现 .nemo 文件: {model_id}，跳过预下载")
+                return
+            target_fname = nemo_files[0]
+            print(f"[predownload] 发现远端 .nemo 文件: {target_fname}，开始下载到 /app/models ...")
+            try:
+                downloaded_path = hf_hub_download(repo_id=model_id, filename=target_fname, cache_dir='/app/models')
+                if downloaded_path and os.path.exists(downloaded_path):
+                    print(f"[predownload] 已下载模型文件: {downloaded_path}")
+                else:
+                    print(f"[predownload] 下载返回路径无效或不存在: {downloaded_path}")
+            except Exception as e:
+                print(f"[predownload] hf_hub_download 失败: {e}")
+        except Exception as e:
+            print(f"[predownload] 查询远端仓库文件列表失败: {e}")
+    except Exception as e:
+        print(f"[predownload] 预下载线程异常: {e}")
+
 def unload_model():
     """从内存/显存中卸载模型。"""
     global asr_model, last_request_time, cuda_available
@@ -1064,6 +1118,7 @@ def transcribe_audio():
 
         # --- 3. 音频切片 (Chunking) ---
         # 动态调整chunk大小基于显存使用情况
+        heavy_ts_request = response_format in ['srt', 'vtt', 'verbose_json']
         if cuda_available:
             allocated, _, total = get_gpu_memory_usage()
             memory_usage_ratio = allocated / total if total > 0 else 0
@@ -1075,11 +1130,38 @@ def transcribe_audio():
                 CHUNK_DURATION_SECONDS = adjusted_chunk_minutes * 60
             else:
                 CHUNK_DURATION_SECONDS = CHUNK_MINITE * 60
+            # 为 ≤8~12GB 显存设备或需要时间戳的请求设置更保守的上限，避免注意力矩阵 OOM
+            try:
+                vram_gb = total
+                cap_env = os.environ.get('CHUNK_SECONDS_CAP', '').strip()
+                if cap_env:
+                    cap_sec = int(float(cap_env))
+                else:
+                    if vram_gb <= 8.5:
+                        cap_sec = 180 if heavy_ts_request else 240
+                    elif vram_gb <= 12.0:
+                        cap_sec = 300 if heavy_ts_request else 480
+                    else:
+                        cap_sec = 600
+                if CHUNK_DURATION_SECONDS > cap_sec:
+                    print(f"[{unique_id}] 基于GPU显存({vram_gb:.1f}GB){'且需时间戳' if heavy_ts_request else ''}，限制chunk时长为 {cap_sec}s")
+                    CHUNK_DURATION_SECONDS = cap_sec
+            except Exception:
+                pass
         else:
             # CPU模式下使用较小的chunk以避免内存不足
             cpu_chunk_minutes = max(3, CHUNK_MINITE // 2)  # CPU模式减半chunk大小
             print(f"[{unique_id}] CPU模式，调整chunk大小到 {cpu_chunk_minutes} 分钟")
             CHUNK_DURATION_SECONDS = cpu_chunk_minutes * 60
+            # CPU 模式也设置上限，尤其在需要时间戳时
+            try:
+                cap_env = os.environ.get('CHUNK_SECONDS_CAP', '').strip()
+                cap_sec = int(float(cap_env)) if cap_env else (180 if heavy_ts_request else 240)
+                if CHUNK_DURATION_SECONDS > cap_sec:
+                    print(f"[{unique_id}] CPU模式限制chunk时长为 {cap_sec}s")
+                    CHUNK_DURATION_SECONDS = cap_sec
+            except Exception:
+                pass
             
         total_duration = get_audio_duration(target_wav_path)
         if total_duration == 0:
@@ -1599,7 +1681,16 @@ def configure_decoding_strategy(model):
                 })
                 print(f"✅ 启用 Beam Search，beam_size={RNNT_BEAM_SIZE}")
             else:
-                model.change_decoding_strategy(decoding_cfg={'strategy': 'greedy'})
+                # 在低显存环境下，禁用 CUDA graphs 降低一次性显存峰值
+                model.change_decoding_strategy(decoding_cfg={
+                    'strategy': 'greedy',
+                    'allow_cuda_graphs': False,
+                    'greedy': {
+                        'use_cuda_graph_decoder': False,
+                        'max_symbols_per_step': 10,
+                        'loop_labels': True,
+                    }
+                })
                 print("✅ 启用 Greedy 解码")
         elif hasattr(model, 'decoder') and hasattr(model.decoder, 'cfg'):
             # 兼容部分模型的 decoder 配置
@@ -1725,6 +1816,13 @@ if __name__ == '__main__':
             cleanup_thread.start()
         else:
             print("模型自动卸载功能已禁用 (IDLE_TIMEOUT_MINUTES=0)。")
+        # 启动后台线程在容器启动时预下载模型文件（仅下载到磁盘，不加载到内存）
+        print("在后台启动模型预下载线程（仅下载文件，不加载到内存）...")
+        try:
+            predownload_thread = threading.Thread(target=predownload_model_artifacts, daemon=True)
+            predownload_thread.start()
+        except Exception as e:
+            print(f"启动模型预下载线程失败: {e}")
     else:
         # 懒加载被禁用，在启动时直接加载模型
         print("懒加载模式已禁用，正在启动时预加载模型...")
