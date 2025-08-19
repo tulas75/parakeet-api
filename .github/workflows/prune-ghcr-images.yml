@@ -1,0 +1,132 @@
+name: Prune GHCR images (keep latest N)
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: "GHCR 容器包名（默认：当前仓库名）"
+        required: false
+        type: string
+      owner:
+        description: "容器包所属者（默认：当前仓库所有者）"
+        required: false
+        type: string
+      keep:
+        description: "保留的最新版本数量"
+        required: false
+        default: "3"
+        type: string
+      dry_run:
+        description: "仅预览将删除的版本（不执行删除）"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  prune:
+    name: Prune container images on GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Resolve inputs and defaults
+        id: vars
+        shell: bash
+        run: |
+          OWNER_INPUT='${{ github.event.inputs.owner }}'
+          PKG_INPUT='${{ github.event.inputs.package_name }}'
+          KEEP_INPUT='${{ github.event.inputs.keep }}'
+          DRY='${{ github.event.inputs.dry_run }}'
+
+          if [ -z "$OWNER_INPUT" ]; then OWNER='${{ github.repository_owner }}'; else OWNER="$OWNER_INPUT"; fi
+
+          # repo name may not always be present in event payload; derive from github.repository as fallback
+          REPO_FULL='${{ github.repository }}' # e.g. owner/repo
+          REPO_NAME="${REPO_FULL##*/}"
+          if [ -z "$PKG_INPUT" ]; then PACKAGE="$REPO_NAME"; else PACKAGE="$PKG_INPUT"; fi
+
+          if [ -z "$KEEP_INPUT" ]; then KEEP=3; else KEEP="$KEEP_INPUT"; fi
+
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
+          echo "keep=$KEEP" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY" >> "$GITHUB_OUTPUT"
+
+      - name: Determine owner scope (user or org)
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          OWNER='${{ steps.vars.outputs.owner }}'
+          TYPE=$(gh api -H "Accept: application/vnd.github+json" "/users/${OWNER}" --jq .type)
+          if [ "$TYPE" = "Organization" ]; then SCOPE="orgs"; else SCOPE="users"; fi
+          echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          echo "owner_type=$TYPE" >> "$GITHUB_OUTPUT"
+
+      - name: List container versions
+        id: list
+        shell: bash
+        run: |
+          set -euo pipefail
+          SCOPE='${{ steps.scope.outputs.scope }}'
+          OWNER='${{ steps.vars.outputs.owner }}'
+          PACKAGE='${{ steps.vars.outputs.package }}'
+
+          # Fetch up to 200 latest versions
+          if ! VERSIONS_JSON=$(gh api -H "Accept: application/vnd.github+json" "/${SCOPE}/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100"); then
+            echo "::error::无法获取 GHCR 包 ${OWNER}/${PACKAGE} 的版本列表（可能包不存在或权限不足）"
+            echo "found=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          COUNT=$(echo "$VERSIONS_JSON" | jq 'length')
+          echo "found=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "$VERSIONS_JSON" > versions.json
+
+          echo "共发现版本: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::notice::未发现任何版本，无需清理。"
+          fi
+
+      - name: Prune old versions (keep latest ${{ steps.vars.outputs.keep }})
+        if: steps.list.outputs.found != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SCOPE='${{ steps.scope.outputs.scope }}'
+          OWNER='${{ steps.vars.outputs.owner }}'
+          PACKAGE='${{ steps.vars.outputs.package }}'
+          KEEP='${{ steps.vars.outputs.keep }}'
+          DRY='${{ steps.vars.outputs.dry_run }}'
+
+          # Sort by created_at desc, skip first KEEP, collect the rest
+          DELETE_IDS=$(jq -r --argjson keep "$KEEP" 'sort_by(.created_at) | reverse | .[$keep:] | .[].id' versions.json)
+
+          if [ -z "$DELETE_IDS" ]; then
+            echo "::notice::版本数量不超过保留数量（$KEEP），无需清理。"
+            exit 0
+          fi
+
+          echo "将清理以下版本（除去最新的 $KEEP 个）："
+          jq -r --argjson keep "$KEEP" '. | sort_by(.created_at) | reverse | .[$keep:] | map({id: .id, created_at: .created_at, tags: .metadata.container.tags}) | ( .[] | "id=\(.id) created_at=\(.created_at) tags=\(.tags)" )' versions.json || true
+
+          if [ "$DRY" = "true" ]; then
+            echo "Dry-run 模式：不执行删除。"
+            exit 0
+          fi
+
+          # Delete each version id
+          while IFS= read -r vid; do
+            if [ -z "$vid" ]; then continue; fi
+            echo "删除版本 ID: $vid"
+            gh api -H "Accept: application/vnd.github+json" -X DELETE "/${SCOPE}/${OWNER}/packages/container/${PACKAGE}/versions/${vid}" || {
+              echo "::warning::删除版本 $vid 失败，继续处理后续版本。";
+            }
+          done <<EOF
+          $DELETE_IDS
+          EOF
+
+          echo "清理完成。"
