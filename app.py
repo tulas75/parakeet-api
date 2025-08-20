@@ -84,6 +84,10 @@ SUPPORTED_LANG_CODES = {
     'bg','hr','cs','da','nl','en','et','fi','fr','de','el','hu','it','lv','lt','mt','pl','pt','ro','sk','sl','es','sv','ru','uk'
 }
 
+# 语言自动拒绝（当未显式传入 language 时，先对短片段做语言初判；若不受支持则直接返回 Whisper 风格错误）
+ENABLE_AUTO_LANGUAGE_REJECTION = os.environ.get('ENABLE_AUTO_LANGUAGE_REJECTION', 'true').lower() in ['true', '1', 't']
+LID_CLIP_SECONDS = int(os.environ.get('LID_CLIP_SECONDS', '45'))
+
 # 推理并发控制（避免多请求同时占用显存导致 OOM）
 MAX_CONCURRENT_INFERENCES = int(os.environ.get('MAX_CONCURRENT_INFERENCES', '1'))
 inference_semaphore = threading.Semaphore(MAX_CONCURRENT_INFERENCES)
@@ -1115,6 +1119,75 @@ def transcribe_audio():
             print(f"FFmpeg 错误: {result.stderr}")
             return jsonify({"error": "文件转换失败", "details": result.stderr}), 500
         temp_files_to_clean.append(target_wav_path)
+
+        # --- 2.5 自动语言拒绝（未显式传 language 时）---
+        if not language and ENABLE_AUTO_LANGUAGE_REJECTION:
+            try:
+                lid_clip_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_lid.wav")
+                temp_files_to_clean.append(lid_clip_path)
+                # 取短片段进行快速转写
+                clip_seconds = max(5, int(LID_CLIP_SECONDS))
+                probe_dur = get_audio_duration(target_wav_path)
+                if probe_dur > 0:
+                    clip_seconds = min(clip_seconds, int(math.ceil(probe_dur)))
+                clip_cmd = [
+                    'ffmpeg', '-y', '-i', target_wav_path,
+                    '-t', str(clip_seconds),
+                    '-ac', '1', '-ar', '16000',
+                    lid_clip_path
+                ]
+                _res = subprocess.run(clip_cmd, capture_output=True, text=True)
+                if _res.returncode == 0 and os.path.exists(lid_clip_path):
+                    # 仅文本推理（不开时间戳，降低开销）
+                    with inference_semaphore:
+                        lid_out = safe_transcribe(
+                            local_asr_model,
+                            lid_clip_path,
+                            need_timestamps=False,
+                            batch_size=1,
+                            num_workers=0,
+                        )
+                    # 提取文本
+                    lid_text = ""
+                    if isinstance(lid_out, list) and lid_out:
+                        first = lid_out[0]
+                        try:
+                            if hasattr(first, 'text') and first.text:
+                                lid_text = str(first.text)
+                            elif hasattr(first, 'segment') and first.segment:
+                                lid_text = str(first.segment)
+                            else:
+                                lid_text = str(first)
+                        except Exception:
+                            lid_text = str(first)
+
+                    # 用轻量文本语言识别做初判
+                    if lid_text and lid_text.strip():
+                        try:
+                            try:
+                                from langdetect import detect  # type: ignore
+                            except Exception:
+                                detect = None  # type: ignore
+                            detected = None
+                            if detect is not None:
+                                detected = detect(lid_text)
+                            # 若能检测到，按主语言判断是否受支持
+                            if detected:
+                                det_primary = str(detected).strip().lower().split('-')[0]
+                                if det_primary and det_primary not in SUPPORTED_LANG_CODES:
+                                    return jsonify({
+                                        "error": {
+                                            "message": f"Unsupported language: {detected}",
+                                            "type": "invalid_request_error",
+                                            "param": "language",
+                                            "code": "unsupported_language"
+                                        }
+                                    }), 400
+                        except Exception as _e:
+                            # 检测失败不影响主流程，继续
+                            print(f"[{unique_id}] 语言自动检测失败，跳过自动拒绝: {_e}")
+            except Exception as _e:
+                print(f"[{unique_id}] 自动语言拒绝阶段异常，已忽略: {_e}")
 
         # --- 3. 音频切片 (Chunking) ---
         # 动态调整chunk大小基于显存使用情况
