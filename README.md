@@ -3,8 +3,10 @@
 基于 NVIDIA NeMo 的中文/多语种语音识别服务，提供与 OpenAI Whisper 兼容的 `/v1/audio/transcriptions` 接口。已打包为支持 GPU 的 Docker 镜像，可一键运行。
 
 - 预置模型：默认 `nvidia/parakeet-tdt-0.6b-v3`
+- 支持25种语言，提供自动语言检测功能
 - 支持长音频分片与重叠拼接，提供 SRT/VTT/verbose_json 等输出
 - 自动检测 CUDA 兼容性：不兼容或无 GPU 时降级 CPU 模式（速度较慢）
+- OpenAI Whisper API 兼容格式，包括错误响应
 
 
 ## 目录
@@ -14,6 +16,7 @@
 - 使用预构建镜像运行
 - 从源码构建并运行
 - API 使用示例
+- 语言检测与支持
 - 配置与环境变量
 - 端口、卷与文件结构
 - 健康检查与监控
@@ -131,6 +134,73 @@ $apiKey = "YOUR_API_KEY"
 curl.exe -X POST "http://localhost:5092/v1/audio/transcriptions" \
   -H "Authorization: Bearer $apiKey" \
   -F "file=@$audio" -F "response_format=json"
+```
+
+## 语言检测与支持
+
+### 支持的语言（25种）
+
+本API支持以下25种语言的转写（基于 parakeet-tdt-0.6b-v3 模型）：
+
+| 语言代码 | 语言名称 | 语言代码 | 语言名称 | 语言代码 | 语言名称 |
+|---------|---------|---------|---------|---------|---------|
+| bg | 保加利亚语 | hr | 克罗地亚语 | cs | 捷克语 |
+| da | 丹麦语 | nl | 荷兰语 | en | 英语 |
+| et | 爱沙尼亚语 | fi | 芬兰语 | fr | 法语 |
+| de | 德语 | el | 希腊语 | hu | 匈牙利语 |
+| it | 意大利语 | lv | 拉脱维亚语 | lt | 立陶宛语 |
+| mt | 马耳他语 | pl | 波兰语 | pt | 葡萄牙语 |
+| ro | 罗马尼亚语 | sk | 斯洛伐克语 | sl | 斯洛文尼亚语 |
+| es | 西班牙语 | sv | 瑞典语 | ru | 俄语 |
+| uk | 乌克兰语 | | | | |
+
+### 自动语言检测
+
+当请求中未指定 `language` 参数时，系统会自动检测音频语言：
+
+1. **检测流程**：
+   - 提取音频前段（默认45秒）进行快速转写
+   - 使用 langdetect 库分析转写文本的语言
+   - 如果检测到支持的语言，则使用该语言进行完整转写
+   - 如果检测到不支持的语言，根据 `ENABLE_AUTO_LANGUAGE_REJECTION` 设置处理
+
+2. **处理规则**：
+   - **显式指定语言**：验证语言是否在支持列表中，不支持则返回 OpenAI 格式错误
+   - **自动检测支持的语言**：使用检测到的语言进行转写
+   - **自动检测不支持的语言**：
+     - 如果 `ENABLE_AUTO_LANGUAGE_REJECTION=true`：返回 OpenAI 格式错误
+     - 如果 `ENABLE_AUTO_LANGUAGE_REJECTION=false`：默认使用英语进行转写
+
+3. **响应格式**：
+   ```json
+   {
+     "text": "转写文本内容",
+     "language": "auto-detected-lang-code"  // 仅在 verbose_json 格式中返回
+   }
+   ```
+
+4. **配置选项**：
+   - `ENABLE_AUTO_LANGUAGE_REJECTION`：是否拒绝不支持的语言（默认 `true`）
+   - `LID_CLIP_SECONDS`：用于语言检测的音频片段长度（默认 `45` 秒）
+
+### 使用示例
+
+```bash
+# 显式指定支持的语言
+curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
+  -F "file=@audio.wav" \
+  -F "language=en" \
+  -F "response_format=json"
+
+# 自动检测语言
+curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
+  -F "file=@audio.wav" \
+  -F "response_format=verbose_json"  # 返回检测到的语言
+
+# 显式指定不支持的语言（返回错误）
+curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
+  -F "file=@audio.wav" \
+  -F "language=zh"  # 返回 OpenAI 格式错误响应
 ```
 
 
