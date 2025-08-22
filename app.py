@@ -1070,10 +1070,11 @@ def transcribe_audio():
     prompt = request.form.get('prompt', None)
     temperature = float(request.form.get('temperature', 0))
     
-    print(f"接收到请求，模型: '{model_name}', 响应格式: '{response_format}'")
+    print(f"接收到请求，模型: '{model_name}', 响应格式: '{response_format}', 语言: '{language}'")
 
     # --- 0.5 语言白名单校验（Whisper 兼容行为）---
     # 若客户端显式传入 language，我们只接受受支持的 25 种语言，否则直接拒绝
+    detected_language = None  # 用于存储自动检测的语言
     if language:
         lang_norm = str(language).strip().lower().replace('_', '-')
         # 兼容像 "en-US" 这种区域码：只取主语言部分
@@ -1120,8 +1121,8 @@ def transcribe_audio():
             return jsonify({"error": "文件转换失败", "details": result.stderr}), 500
         temp_files_to_clean.append(target_wav_path)
 
-        # --- 2.5 自动语言拒绝（未显式传 language 时）---
-        if not language and ENABLE_AUTO_LANGUAGE_REJECTION:
+        # --- 2.5 自动语言检测和验证（未显式传 language 时）---
+        if not language:
             try:
                 lid_clip_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_lid.wav")
                 temp_files_to_clean.append(lid_clip_path)
@@ -1161,7 +1162,7 @@ def transcribe_audio():
                         except Exception:
                             lid_text = str(first)
 
-                    # 用轻量文本语言识别做初判
+                    # 用轻量文本语言识别做语言检测
                     if lid_text and lid_text.strip():
                         try:
                             try:
@@ -1171,23 +1172,39 @@ def transcribe_audio():
                             detected = None
                             if detect is not None:
                                 detected = detect(lid_text)
-                            # 若能检测到，按主语言判断是否受支持
+                            # 若能检测到语言
                             if detected:
                                 det_primary = str(detected).strip().lower().split('-')[0]
-                                if det_primary and det_primary not in SUPPORTED_LANG_CODES:
-                                    return jsonify({
-                                        "error": {
-                                            "message": f"Unsupported language: {detected}",
-                                            "type": "invalid_request_error",
-                                            "param": "language",
-                                            "code": "unsupported_language"
-                                        }
-                                    }), 400
+                                if det_primary:
+                                    if det_primary in SUPPORTED_LANG_CODES:
+                                        # 检测到支持的语言，存储用于后续使用
+                                        detected_language = det_primary
+                                        print(f"[{unique_id}] 自动检测到语言: {detected_language}")
+                                    elif ENABLE_AUTO_LANGUAGE_REJECTION:
+                                        # 检测到不支持的语言且启用了自动拒绝
+                                        return jsonify({
+                                            "error": {
+                                                "message": f"Unsupported language: {detected}",
+                                                "type": "invalid_request_error",
+                                                "param": "language",
+                                                "code": "unsupported_language"
+                                            }
+                                        }), 400
+                                    else:
+                                        # 检测到不支持的语言但未启用自动拒绝，默认为英语
+                                        detected_language = "en"
+                                        print(f"[{unique_id}] 检测到不支持的语言 {detected}，默认使用英语")
                         except Exception as _e:
-                            # 检测失败不影响主流程，继续
-                            print(f"[{unique_id}] 语言自动检测失败，跳过自动拒绝: {_e}")
+                            # 检测失败不影响主流程，默认使用英语
+                            print(f"[{unique_id}] 语言自动检测失败，默认使用英语: {_e}")
+                            detected_language = "en"
+                    else:
+                        # 无法提取文本，默认使用英语
+                        print(f"[{unique_id}] 无法提取文本进行语言检测，默认使用英语")
+                        detected_language = "en"
             except Exception as _e:
-                print(f"[{unique_id}] 自动语言拒绝阶段异常，已忽略: {_e}")
+                print(f"[{unique_id}] 自动语言检测阶段异常，默认使用英语: {_e}")
+                detected_language = "en"
 
         # --- 3. 音频切片 (Chunking) ---
         # 动态调整chunk大小基于显存使用情况
@@ -1468,7 +1485,7 @@ def transcribe_audio():
             # 详细的 JSON 格式，包含更多信息
             response_data = {
                 "task": "transcribe",
-                "language": language or "en",
+                "language": language or detected_language or "en",
                 "duration": total_duration,
                 "text": full_text,
                 "segments": [
