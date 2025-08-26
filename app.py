@@ -98,6 +98,17 @@ ENABLE_GRADIENT_CHECKPOINTING = os.environ.get('ENABLE_GRADIENT_CHECKPOINTING', 
 MAX_CHUNK_MEMORY_MB = int(os.environ.get('MAX_CHUNK_MEMORY_MB', '1500'))
 FORCE_CLEANUP_THRESHOLD = float(os.environ.get('FORCE_CLEANUP_THRESHOLD', '0.8'))
 
+# 闲置时资源优化配置
+IDLE_MEMORY_CLEANUP_INTERVAL = int(os.environ.get('IDLE_MEMORY_CLEANUP_INTERVAL', '120'))  # 闲置时内存清理间隔(秒)，默认2分钟
+IDLE_DEEP_CLEANUP_THRESHOLD = int(os.environ.get('IDLE_DEEP_CLEANUP_THRESHOLD', '600'))  # 深度清理阈值(秒)，默认10分钟
+ENABLE_IDLE_CPU_OPTIMIZATION = os.environ.get('ENABLE_IDLE_CPU_OPTIMIZATION', 'true').lower() in ['true', '1', 't']
+IDLE_MONITORING_INTERVAL = int(os.environ.get('IDLE_MONITORING_INTERVAL', '30'))  # 闲置监控间隔(秒)，默认30秒
+# 内存优化配置 - 简化为合理默认值，无需用户配置
+ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION = os.environ.get('ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION', 'false').lower() in ['true', '1', 't']
+IMMEDIATE_CLEANUP_AFTER_REQUEST = os.environ.get('IMMEDIATE_CLEANUP_AFTER_REQUEST', 'false').lower() in ['true', '1', 't']
+MEMORY_USAGE_ALERT_THRESHOLD_GB = float(os.environ.get('MEMORY_USAGE_ALERT_THRESHOLD_GB', '12.0'))  # 设置较高的阈值，避免频繁清理
+AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES = int(os.environ.get('AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES', '30'))  # 保持与IDLE_TIMEOUT_MINUTES一致
+
 # Tensor Core 优化配置
 ENABLE_TENSOR_CORE = os.environ.get('ENABLE_TENSOR_CORE', 'true').lower() in ['true', '1', 't']
 ENABLE_CUDNN_BENCHMARK = os.environ.get('ENABLE_CUDNN_BENCHMARK', 'true').lower() in ['true', '1', 't']
@@ -566,6 +577,74 @@ def aggressive_memory_cleanup():
         except Exception as e:
             print(f"⚠️ CUDA缓存清理失败: {e}")
 
+def idle_deep_memory_cleanup():
+    """闲置时深度内存清理函数 - 简化为基本清理"""
+    global cuda_available
+    print("🧹 执行闲置时内存清理...")
+    
+    # 执行标准的内存清理
+    aggressive_memory_cleanup()
+    
+    # 额外的清理措施
+    if cuda_available:
+        try:
+            # 清空CUDA缓存
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            
+            # 重置内存统计
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_accumulated_memory_stats()
+        except Exception as e:
+            print(f"⚠️ CUDA清理失败: {e}")
+    
+    # 垃圾回收
+    for _ in range(2):
+        gc.collect()
+    
+    if cuda_available:
+        allocated, reserved, total = get_gpu_memory_usage()
+        print(f"✅ 清理完成，当前显存使用: {allocated:.2f}GB / {total:.2f}GB")
+    else:
+        memory = psutil.virtual_memory()
+        print(f"✅ 清理完成，当前内存使用: {memory.used/1024**3:.2f}GB / {memory.total/1024**3:.2f}GB")
+
+def immediate_post_request_cleanup():
+    """请求完成后执行的基本内存清理"""
+    print("🧽 执行请求后清理...")
+    global cuda_available
+    
+    if cuda_available:
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+    
+    # 基本垃圾回收
+    gc.collect()
+
+def check_memory_usage_and_cleanup():
+    """检查内存使用情况并在必要时触发清理 - 仅在极高使用时清理"""
+    global cuda_available
+    
+    if cuda_available:
+        allocated, _, total = get_gpu_memory_usage()
+        # 只有在显存使用超过高阈值时才清理，避免频繁干扰
+        if allocated > MEMORY_USAGE_ALERT_THRESHOLD_GB and allocated / total > 0.9:
+            print(f"🚨 显存使用过高({allocated:.2f}GB)，执行清理")
+            aggressive_memory_cleanup()
+            return True
+    else:
+        memory = psutil.virtual_memory()
+        # 只有在内存使用率超过90%时才清理
+        if memory.percent > 90:
+            print(f"🚨 内存使用过高({memory.percent:.1f}%)，执行清理")
+            aggressive_memory_cleanup()
+            return True
+    
+    return False
+
 def should_force_cleanup():
     """检查是否需要强制清理显存"""
     global cuda_available
@@ -816,7 +895,9 @@ def unload_model():
                 print(f"卸载前显存使用: {allocated_before:.2f}GB / {total:.2f}GB")
             
             asr_model = None
-            aggressive_memory_cleanup()
+            
+            # 卸载后立即执行深度清理
+            idle_deep_memory_cleanup()
             
             # 显示卸载后的显存使用
             if cuda_available:
@@ -825,17 +906,83 @@ def unload_model():
                 print(f"释放显存: {allocated_before - allocated_after:.2f}GB")
             
             last_request_time = None # 重置计时器，防止重复卸载
-            print("✅ 模型已成功卸载。")
+            print("✅ 模型已成功卸载并完成深度清理。")
 
 def model_cleanup_checker():
     """后台线程，周期性检查模型是否闲置过久并执行卸载。"""
+    last_cleanup_time = datetime.datetime.now()
+    
     while True:
-        # 每 60 秒检查一次
-        time.sleep(60)
+        # 根据系统状态自适应调整检查间隔
+        current_time = datetime.datetime.now()
+        
+        # 基础监控间隔 - 使用更短的间隔以便更频繁检查
+        sleep_interval = IDLE_MONITORING_INTERVAL
+        
+        # 定期检查内存使用情况并在极高使用时清理
+        if check_memory_usage_and_cleanup():
+            last_cleanup_time = current_time
+        
         if asr_model is not None and last_request_time is not None:
-            idle_duration = (datetime.datetime.now() - last_request_time).total_seconds()
-            if idle_duration > IDLE_TIMEOUT_MINUTES * 60:
+            idle_duration = (current_time - last_request_time).total_seconds()
+            
+            # 使用配置的模型卸载阈值
+            model_unload_threshold = IDLE_TIMEOUT_MINUTES * 60
+            
+            # 检查是否需要卸载模型
+            if idle_duration > model_unload_threshold:
+                print(f"模型闲置 {idle_duration/60:.1f} 分钟，超过阈值 {model_unload_threshold/60:.1f} 分钟")
                 unload_model()
+                # 模型卸载后立即执行深度清理
+                idle_deep_memory_cleanup()
+                last_cleanup_time = current_time
+            
+            # 根据闲置时间调整检查频率
+            elif idle_duration > IDLE_DEEP_CLEANUP_THRESHOLD:
+                # 长时间闲置时，降低检查频率但执行深度清理
+                sleep_interval = max(60, IDLE_MONITORING_INTERVAL * 2)  # 最少1分钟间隔
+                if (current_time - last_cleanup_time).total_seconds() > IDLE_MEMORY_CLEANUP_INTERVAL:
+                    print(f"执行定期深度清理 (闲置 {idle_duration/60:.1f} 分钟)")
+                    idle_deep_memory_cleanup()
+                    last_cleanup_time = current_time
+            
+            elif idle_duration > IDLE_MEMORY_CLEANUP_INTERVAL:
+                # 中等闲置时间，执行轻量清理
+                if (current_time - last_cleanup_time).total_seconds() > IDLE_MEMORY_CLEANUP_INTERVAL:
+                    print(f"执行定期内存清理 (闲置 {idle_duration/60:.1f} 分钟)")
+                    if AGGRESSIVE_MEMORY_CLEANUP and should_force_cleanup():
+                        print("🧹 执行闲置期间内存清理...")
+                        aggressive_memory_cleanup()
+                    else:
+                        # 即使不需要强制清理，也进行基础清理
+                        if cuda_available:
+                            try:
+                                torch.cuda.empty_cache()
+                            except Exception:
+                                pass
+                        gc.collect()
+                    last_cleanup_time = current_time
+            
+            # 即使在短期闲置时也进行最基本的清理
+            elif idle_duration > 60:  # 闲置超过1分钟
+                if (current_time - last_cleanup_time).total_seconds() > 120:  # 每2分钟清理一次
+                    if cuda_available:
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                    gc.collect()
+                    last_cleanup_time = current_time
+        
+        else:
+            # 模型未加载或未有请求时，使用较长的检查间隔并定期清理
+            sleep_interval = max(60, IDLE_MONITORING_INTERVAL * 2)  # 减少到最少1分钟间隔
+            if (current_time - last_cleanup_time).total_seconds() > IDLE_MEMORY_CLEANUP_INTERVAL:
+                print("执行无模型状态下的定期清理")
+                aggressive_memory_cleanup()
+                last_cleanup_time = current_time
+        
+        time.sleep(sleep_interval)
 
 
 # --- Flask 应用初始化 ---
@@ -961,10 +1108,11 @@ def health_check():
     健康检查端点 - 用于Docker健康检查和服务监控
     """
     try:
+        current_time = datetime.datetime.now()
         # 检查基本服务状态
         health_status: Dict[str, Any] = {
             "status": "healthy",
-            "timestamp": datetime.datetime.now().isoformat(),
+            "timestamp": current_time.isoformat(),
             "service": "parakeet-api",
             "version": "1.0.0"
         }
@@ -977,8 +1125,10 @@ def health_check():
                 health_status["gpu"] = {
                     "available": True,
                     "memory_allocated_gb": round(allocated, 2),
+                    "memory_reserved_gb": round(reserved, 2),
                     "memory_total_gb": round(total, 2),
-                    "memory_usage_percent": round((allocated/total)*100, 1) if total > 0 else 0
+                    "memory_usage_percent": round((allocated/total)*100, 1) if total > 0 else 0,
+                    "memory_reserved_percent": round((reserved/total)*100, 1) if total > 0 else 0
                 }
             except Exception as e:
                 health_status["gpu"] = {
@@ -991,17 +1141,51 @@ def health_check():
                 "mode": "cpu"
             }
         
-        # 检查模型状态
-        health_status["model"] = {
+        # 检查模型状态和闲置信息
+        model_info = {
             "loaded": asr_model is not None,
             "lazy_load": ENABLE_LAZY_LOAD
         }
         
-        # 检查内存使用
+        if last_request_time is not None:
+            idle_seconds = (current_time - last_request_time).total_seconds()
+            model_info["last_request_time"] = last_request_time.isoformat()
+            model_info["idle_duration_seconds"] = round(idle_seconds, 1)
+            model_info["idle_duration_minutes"] = round(idle_seconds / 60, 1)
+            
+            # 添加闲置状态分类
+            if idle_seconds > IDLE_TIMEOUT_MINUTES * 60:
+                model_info["idle_status"] = "ready_for_unload"
+            elif idle_seconds > IDLE_DEEP_CLEANUP_THRESHOLD:
+                model_info["idle_status"] = "deep_idle"
+            elif idle_seconds > IDLE_MEMORY_CLEANUP_INTERVAL:
+                model_info["idle_status"] = "idle"
+            else:
+                model_info["idle_status"] = "active"
+        else:
+            model_info["idle_status"] = "no_requests" if asr_model is not None else "unloaded"
+        
+        health_status["model"] = model_info
+        
+        # 检查系统资源使用
         memory = psutil.virtual_memory()
+        try:
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+        except:
+            cpu_percent = 0.0
+            
         health_status["system"] = {
             "memory_usage_percent": memory.percent,
-            "memory_available_gb": round(memory.available / 1024**3, 2)
+            "memory_available_gb": round(memory.available / 1024**3, 2),
+            "memory_total_gb": round(memory.total / 1024**3, 2),
+            "cpu_usage_percent": round(cpu_percent, 1)
+        }
+        
+        # 添加基本优化配置状态
+        health_status["optimization"] = {
+            "aggressive_memory_cleanup": AGGRESSIVE_MEMORY_CLEANUP,
+            "idle_timeout_minutes": IDLE_TIMEOUT_MINUTES,
+            "idle_memory_cleanup_interval": IDLE_MEMORY_CLEANUP_INTERVAL
         }
         
         return jsonify(health_status), 200
@@ -1537,7 +1721,10 @@ def transcribe_audio():
                 os.remove(f_path)
         print(f"[{unique_id}] 临时文件已清理。")
         
-        # --- 7. 强制清理内存，避免累积 ---
+        # --- 7. 立即执行请求后清理 ---
+        immediate_post_request_cleanup()
+        
+        # --- 8. 强制清理内存，避免累积 ---
         print(f"[{unique_id}] 执行最终内存清理...")
         if cuda_available:
             allocated_before, _, total = get_gpu_memory_usage()
@@ -1546,6 +1733,7 @@ def transcribe_audio():
             memory_before = psutil.virtual_memory()
             print(f"[{unique_id}] 清理前内存使用: {memory_before.used/1024**3:.2f}GB / {memory_before.total/1024**3:.2f}GB")
         
+        # 执行标准内存清理
         aggressive_memory_cleanup()
         
         if cuda_available:
@@ -2004,6 +2192,12 @@ if __name__ == '__main__':
     print(f"强制清理阈值: {FORCE_CLEANUP_THRESHOLD*100:.0f}%")
     print(f"最大chunk内存: {MAX_CHUNK_MEMORY_MB}MB")
     print(f"默认chunk时长: {CHUNK_MINITE} 分钟")
+    print("=" * 25)
+    print("")
+    print("=== 闲置资源优化配置 ===")
+    print(f"模型闲置超时: {IDLE_TIMEOUT_MINUTES} 分钟")
+    print(f"闲置内存清理间隔: {IDLE_MEMORY_CLEANUP_INTERVAL} 秒")
+    print(f"监控间隔: {IDLE_MONITORING_INTERVAL} 秒")
     # 初始化CUDA兼容性检查
     print("正在检查CUDA兼容性...")
     cuda_available = check_cuda_compatibility()
