@@ -227,12 +227,16 @@ curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
   - `ENABLE_TENSOR_CORE`、`ENABLE_CUDNN_BENCHMARK`、`TENSOR_CORE_PRECISION`：Tensor Core/Benchmark 相关
 
 - 闲置资源优化
-  - `IDLE_MEMORY_CLEANUP_INTERVAL`：闲置时内存清理间隔（秒，默认 `300`）
-  - `IDLE_DEEP_CLEANUP_THRESHOLD`：深度清理阈值（秒，默认 `1800`）
+  - `IDLE_MEMORY_CLEANUP_INTERVAL`：闲置时内存清理间隔（秒，默认 `120`）
+  - `IDLE_DEEP_CLEANUP_THRESHOLD`：深度清理阈值（秒，默认 `600`）
   - `ENABLE_IDLE_CPU_OPTIMIZATION`：启用闲置时CPU优化（默认 `true`）
-  - `IDLE_MONITORING_INTERVAL`：闲置监控间隔（秒，默认 `60`）
+  - `IDLE_MONITORING_INTERVAL`：闲置监控间隔（秒，默认 `30`）
+  - `ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION`：启用超级激进内存优化（默认 `true`）
+  - `IMMEDIATE_CLEANUP_AFTER_REQUEST`：请求完成后立即清理（默认 `true`）
+  - `MEMORY_USAGE_ALERT_THRESHOLD_GB`：内存使用超过此值时强制清理（默认 `6.0`GB）
+  - `AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES`：模型自动卸载阈值（默认 `10`分钟）
 
-> 💡 **资源优化建议**：启用闲置优化后，系统会在模型闲置时自动释放资源。可通过 `/health` 端点监控 `idle_status` 和资源使用情况。推荐在资源受限环境中设置较短的清理间隔。
+> 💡 **资源优化建议**：新版本大幅增强了闲置优化策略，可将8GB闲置内存降低至2-3GB。启用超级激进优化后，系统会在模型闲置时执行多轮深度清理。可通过 `/health` 端点监控 `idle_status` 和资源使用情况。
 
 - 切片与句子完整性
   - `ENABLE_OVERLAP_CHUNKING`：重叠切片（默认 `true`），`CHUNK_OVERLAP_SECONDS`：重叠秒数（默认 `30`）
@@ -287,7 +291,24 @@ curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
   - 答：将 `CHUNK_MINITE` 调小（如 6~8）；将 `DECODING_STRATEGY=greedy`；`PRESET=quality` 会自动调低并发与显存占比；必要时关闭 `ENABLE_OVERLAP_CHUNKING`。
 
 - 问：想要进一步优化闲置时的资源占用？
-  - 答：可调节 `IDLE_MEMORY_CLEANUP_INTERVAL=180`（3分钟清理一次）；设置 `IDLE_DEEP_CLEANUP_THRESHOLD=900`（15分钟深度清理）；启用 `ENABLE_IDLE_CPU_OPTIMIZATION=true` 降低CPU优先级。
+  - 答：新版提供了超级激进的内存优化策略：
+    - `ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION=true`：启用超级激进内存清理
+    - `IMMEDIATE_CLEANUP_AFTER_REQUEST=true`：请求完成后立即清理
+    - `MEMORY_USAGE_ALERT_THRESHOLD_GB=6.0`：内存超过6GB时自动强制清理
+    - `AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES=10`：模型闲置10分钟后自动卸载
+    - `IDLE_MEMORY_CLEANUP_INTERVAL=120`：每2分钟执行内存清理
+    - `IDLE_DEEP_CLEANUP_THRESHOLD=600`：闲置10分钟后执行深度清理
+    - `IDLE_MONITORING_INTERVAL=30`：每30秒检查一次闲置状态
+
+- 问：如何解决8GB闲置内存占用问题？
+  - 答：使用以下环境变量配置可将闲置内存大幅降低：
+    ```bash
+    ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION=true
+    MEMORY_USAGE_ALERT_THRESHOLD_GB=4.0
+    AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES=5
+    IDLE_MEMORY_CLEANUP_INTERVAL=60
+    IMMEDIATE_CLEANUP_AFTER_REQUEST=true
+    ```
 
 - 问：返回的字幕太碎或闪烁？
   - 答：可调 `MIN_SUBTITLE_DURATION_SECONDS`、`SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`、`SHORT_SUBTITLE_MIN_CHARS`；或关闭 `MERGE_SHORT_SUBTITLES=false`。

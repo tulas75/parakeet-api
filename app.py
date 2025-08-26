@@ -99,10 +99,15 @@ MAX_CHUNK_MEMORY_MB = int(os.environ.get('MAX_CHUNK_MEMORY_MB', '1500'))
 FORCE_CLEANUP_THRESHOLD = float(os.environ.get('FORCE_CLEANUP_THRESHOLD', '0.8'))
 
 # 闲置时资源优化配置
-IDLE_MEMORY_CLEANUP_INTERVAL = int(os.environ.get('IDLE_MEMORY_CLEANUP_INTERVAL', '300'))  # 闲置时内存清理间隔(秒)，默认5分钟
-IDLE_DEEP_CLEANUP_THRESHOLD = int(os.environ.get('IDLE_DEEP_CLEANUP_THRESHOLD', '1800'))  # 深度清理阈值(秒)，默认30分钟
+IDLE_MEMORY_CLEANUP_INTERVAL = int(os.environ.get('IDLE_MEMORY_CLEANUP_INTERVAL', '120'))  # 闲置时内存清理间隔(秒)，默认2分钟
+IDLE_DEEP_CLEANUP_THRESHOLD = int(os.environ.get('IDLE_DEEP_CLEANUP_THRESHOLD', '600'))  # 深度清理阈值(秒)，默认10分钟
 ENABLE_IDLE_CPU_OPTIMIZATION = os.environ.get('ENABLE_IDLE_CPU_OPTIMIZATION', 'true').lower() in ['true', '1', 't']
-IDLE_MONITORING_INTERVAL = int(os.environ.get('IDLE_MONITORING_INTERVAL', '60'))  # 闲置监控间隔(秒)，默认1分钟
+IDLE_MONITORING_INTERVAL = int(os.environ.get('IDLE_MONITORING_INTERVAL', '30'))  # 闲置监控间隔(秒)，默认30秒
+# 超级激进内存优化配置
+ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION = os.environ.get('ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION', 'true').lower() in ['true', '1', 't']
+IMMEDIATE_CLEANUP_AFTER_REQUEST = os.environ.get('IMMEDIATE_CLEANUP_AFTER_REQUEST', 'true').lower() in ['true', '1', 't']
+MEMORY_USAGE_ALERT_THRESHOLD_GB = float(os.environ.get('MEMORY_USAGE_ALERT_THRESHOLD_GB', '6.0'))  # 内存使用超过6GB时告警并强制清理
+AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES = int(os.environ.get('AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES', '10'))  # 自动卸载模型阈值，默认10分钟
 
 # Tensor Core 优化配置
 ENABLE_TENSOR_CORE = os.environ.get('ENABLE_TENSOR_CORE', 'true').lower() in ['true', '1', 't']
@@ -572,31 +577,124 @@ def aggressive_memory_cleanup():
         except Exception as e:
             print(f"⚠️ CUDA缓存清理失败: {e}")
 
+def ultra_aggressive_memory_cleanup():
+    """超级激进的内存清理函数 - 用于处理高内存使用情况"""
+    global cuda_available
+    print("🔥 执行超级激进内存清理...")
+    
+    # 记录清理前的内存使用
+    if cuda_available:
+        allocated_before, reserved_before, total = get_gpu_memory_usage()
+        print(f"清理前显存使用: {allocated_before:.2f}GB / {total:.2f}GB ({allocated_before/total*100:.1f}%)")
+    else:
+        memory_before = psutil.virtual_memory()
+        print(f"清理前内存使用: {memory_before.used/1024**3:.2f}GB / {memory_before.total/1024**3:.2f}GB ({memory_before.percent:.1f}%)")
+    
+    # 执行标准的激进清理
+    aggressive_memory_cleanup()
+    
+    # 超级激进的CUDA清理
+    if cuda_available:
+        try:
+            # 强制同步所有CUDA流
+            torch.cuda.synchronize()
+            
+            # 设置空上下文以释放更多内存
+            torch.cuda.empty_cache()
+            
+            # 多轮强制清空CUDA缓存
+            for round_num in range(5):
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                if round_num < 4:  # 在轮次间进行垃圾回收
+                    gc.collect()
+            
+            # 重置所有CUDA统计和状态
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_accumulated_memory_stats()
+            
+            # 尝试重置CUDA上下文（如果支持）
+            try:
+                if hasattr(torch.cuda, 'reset_memory_stats'):
+                    torch.cuda.reset_memory_stats()
+                if hasattr(torch.cuda, 'ipc_collect'):
+                    torch.cuda.ipc_collect()
+            except Exception:
+                pass
+                
+        except Exception as e:
+            print(f"⚠️ 超级激进CUDA清理失败: {e}")
+    
+    # 超强力的Python垃圾回收
+    print("执行强力垃圾回收...")
+    for round_num in range(8):
+        collected = gc.collect()
+        if collected > 0:
+            print(f"垃圾回收轮次 {round_num + 1}: 回收了 {collected} 个对象")
+    
+    # 强制运行所有终结器
+    try:
+        import weakref
+        weakref.finalize._run_finalizers()
+    except Exception:
+        pass
+    
+    # 记录清理后的内存使用
+    if cuda_available:
+        allocated_after, reserved_after, total = get_gpu_memory_usage()
+        saved_memory = allocated_before - allocated_after
+        print(f"清理后显存使用: {allocated_after:.2f}GB / {total:.2f}GB ({allocated_after/total*100:.1f}%)")
+        print(f"✅ 超级激进清理完成，释放显存: {saved_memory:.2f}GB")
+    else:
+        memory_after = psutil.virtual_memory()
+        print(f"清理后内存使用: {memory_after.used/1024**3:.2f}GB / {memory_after.total/1024**3:.2f}GB ({memory_after.percent:.1f}%)")
+        print(f"✅ 超级激进清理完成")
+
 def idle_deep_memory_cleanup():
     """闲置时深度内存清理函数"""
     global cuda_available
     print("🧹 执行闲置时深度内存清理...")
     
-    # 执行标准的激进清理
-    aggressive_memory_cleanup()
-    
-    # 额外的深度清理措施
+    # 检查是否需要超级激进清理
+    needs_ultra_cleanup = False
     if cuda_available:
-        try:
-            # 多次清空CUDA缓存以确保彻底
-            for _ in range(3):
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            
-            # 重置所有内存统计
-            torch.cuda.reset_peak_memory_stats()
-            torch.cuda.reset_accumulated_memory_stats()
-        except Exception as e:
-            print(f"⚠️ 深度CUDA清理失败: {e}")
+        allocated, _, total = get_gpu_memory_usage()
+        if allocated > MEMORY_USAGE_ALERT_THRESHOLD_GB:
+            needs_ultra_cleanup = True
+            print(f"⚠️ 显存使用({allocated:.2f}GB)超过警告阈值({MEMORY_USAGE_ALERT_THRESHOLD_GB:.1f}GB)，启用超级激进清理")
+    else:
+        memory = psutil.virtual_memory()
+        memory_gb = memory.used / 1024**3
+        if memory_gb > MEMORY_USAGE_ALERT_THRESHOLD_GB:
+            needs_ultra_cleanup = True
+            print(f"⚠️ 内存使用({memory_gb:.2f}GB)超过警告阈值({MEMORY_USAGE_ALERT_THRESHOLD_GB:.1f}GB)，启用超级激进清理")
     
-    # 更强力的垃圾回收
-    for _ in range(5):
-        gc.collect()
+    if needs_ultra_cleanup and ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION:
+        ultra_aggressive_memory_cleanup()
+    else:
+        # 执行标准的激进清理
+        aggressive_memory_cleanup()
+        
+        # 额外的深度清理措施
+        if cuda_available:
+            try:
+                # 多次清空CUDA缓存以确保彻底
+                for _ in range(3):
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                
+                # 重置所有内存统计
+                torch.cuda.reset_peak_memory_stats()
+                torch.cuda.reset_accumulated_memory_stats()
+            except Exception as e:
+                print(f"⚠️ 深度CUDA清理失败: {e}")
+        
+        # 更强力的垃圾回收
+        for _ in range(5):
+            gc.collect()
+        
+        allocated, reserved, total = get_gpu_memory_usage()
+        print(f"✅ 深度清理完成，当前显存使用: {allocated:.2f}GB / {total:.2f}GB")
     
     # 尝试设置低优先级 (仅在支持的系统上)
     if ENABLE_IDLE_CPU_OPTIMIZATION:
@@ -612,9 +710,50 @@ def idle_deep_memory_cleanup():
         except Exception as e:
             # 静默失败，不影响主要功能
             pass
+
+def immediate_post_request_cleanup():
+    """请求完成后立即执行的内存清理"""
+    if not IMMEDIATE_CLEANUP_AFTER_REQUEST:
+        return
     
-    allocated, reserved, total = get_gpu_memory_usage()
-    print(f"✅ 深度清理完成，当前显存使用: {allocated:.2f}GB / {total:.2f}GB")
+    print("🧽 执行请求后即时清理...")
+    global cuda_available
+    
+    if cuda_available:
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+    
+    # 快速垃圾回收
+    gc.collect()
+
+def check_memory_usage_and_cleanup():
+    """检查内存使用情况并在必要时触发清理"""
+    global cuda_available
+    
+    if cuda_available:
+        allocated, _, total = get_gpu_memory_usage()
+        if allocated > MEMORY_USAGE_ALERT_THRESHOLD_GB:
+            print(f"🚨 显存使用过高({allocated:.2f}GB > {MEMORY_USAGE_ALERT_THRESHOLD_GB:.1f}GB)，立即执行清理")
+            if ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION:
+                ultra_aggressive_memory_cleanup()
+            else:
+                aggressive_memory_cleanup()
+            return True
+    else:
+        memory = psutil.virtual_memory()
+        memory_gb = memory.used / 1024**3
+        if memory_gb > MEMORY_USAGE_ALERT_THRESHOLD_GB:
+            print(f"🚨 内存使用过高({memory_gb:.2f}GB > {MEMORY_USAGE_ALERT_THRESHOLD_GB:.1f}GB)，立即执行清理")
+            if ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION:
+                ultra_aggressive_memory_cleanup()
+            else:
+                aggressive_memory_cleanup()
+            return True
+    
+    return False
 
 def should_force_cleanup():
     """检查是否需要强制清理显存"""
@@ -887,14 +1026,22 @@ def model_cleanup_checker():
         # 根据系统状态自适应调整检查间隔
         current_time = datetime.datetime.now()
         
-        # 基础监控间隔
+        # 基础监控间隔 - 使用更短的间隔以便更频繁检查
         sleep_interval = IDLE_MONITORING_INTERVAL
+        
+        # 定期检查内存使用情况并在需要时强制清理
+        if check_memory_usage_and_cleanup():
+            last_cleanup_time = current_time
         
         if asr_model is not None and last_request_time is not None:
             idle_duration = (current_time - last_request_time).total_seconds()
             
+            # 使用更短的模型卸载阈值
+            model_unload_threshold = min(IDLE_TIMEOUT_MINUTES * 60, AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES * 60)
+            
             # 检查是否需要卸载模型
-            if idle_duration > IDLE_TIMEOUT_MINUTES * 60:
+            if idle_duration > model_unload_threshold:
+                print(f"模型闲置 {idle_duration/60:.1f} 分钟，超过阈值 {model_unload_threshold/60:.1f} 分钟")
                 unload_model()
                 # 模型卸载后立即执行深度清理
                 idle_deep_memory_cleanup()
@@ -903,23 +1050,45 @@ def model_cleanup_checker():
             # 根据闲置时间调整检查频率
             elif idle_duration > IDLE_DEEP_CLEANUP_THRESHOLD:
                 # 长时间闲置时，降低检查频率但执行深度清理
-                sleep_interval = max(120, IDLE_MONITORING_INTERVAL * 2)  # 最少2分钟间隔
+                sleep_interval = max(60, IDLE_MONITORING_INTERVAL * 2)  # 最少1分钟间隔
                 if (current_time - last_cleanup_time).total_seconds() > IDLE_MEMORY_CLEANUP_INTERVAL:
+                    print(f"执行定期深度清理 (闲置 {idle_duration/60:.1f} 分钟)")
                     idle_deep_memory_cleanup()
                     last_cleanup_time = current_time
             
             elif idle_duration > IDLE_MEMORY_CLEANUP_INTERVAL:
                 # 中等闲置时间，执行轻量清理
                 if (current_time - last_cleanup_time).total_seconds() > IDLE_MEMORY_CLEANUP_INTERVAL:
+                    print(f"执行定期内存清理 (闲置 {idle_duration/60:.1f} 分钟)")
                     if AGGRESSIVE_MEMORY_CLEANUP and should_force_cleanup():
                         print("🧹 执行闲置期间内存清理...")
                         aggressive_memory_cleanup()
-                        last_cleanup_time = current_time
+                    else:
+                        # 即使不需要强制清理，也进行基础清理
+                        if cuda_available:
+                            try:
+                                torch.cuda.empty_cache()
+                            except Exception:
+                                pass
+                        gc.collect()
+                    last_cleanup_time = current_time
+            
+            # 即使在短期闲置时也进行最基本的清理
+            elif idle_duration > 60:  # 闲置超过1分钟
+                if (current_time - last_cleanup_time).total_seconds() > 120:  # 每2分钟清理一次
+                    if cuda_available:
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                    gc.collect()
+                    last_cleanup_time = current_time
         
         else:
             # 模型未加载或未有请求时，使用较长的检查间隔并定期清理
-            sleep_interval = max(120, IDLE_MONITORING_INTERVAL * 3)
-            if (current_time - last_cleanup_time).total_seconds() > IDLE_MEMORY_CLEANUP_INTERVAL * 2:
+            sleep_interval = max(60, IDLE_MONITORING_INTERVAL * 2)  # 减少到最少1分钟间隔
+            if (current_time - last_cleanup_time).total_seconds() > IDLE_MEMORY_CLEANUP_INTERVAL:
+                print("执行无模型状态下的定期清理")
                 aggressive_memory_cleanup()
                 last_cleanup_time = current_time
         
@@ -1129,7 +1298,12 @@ def health_check():
             "idle_memory_cleanup_interval": IDLE_MEMORY_CLEANUP_INTERVAL,
             "idle_deep_cleanup_threshold": IDLE_DEEP_CLEANUP_THRESHOLD,
             "enable_idle_cpu_optimization": ENABLE_IDLE_CPU_OPTIMIZATION,
-            "force_cleanup_threshold": FORCE_CLEANUP_THRESHOLD
+            "force_cleanup_threshold": FORCE_CLEANUP_THRESHOLD,
+            "enable_aggressive_idle_optimization": ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION,
+            "immediate_cleanup_after_request": IMMEDIATE_CLEANUP_AFTER_REQUEST,
+            "memory_usage_alert_threshold_gb": MEMORY_USAGE_ALERT_THRESHOLD_GB,
+            "auto_model_unload_threshold_minutes": AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES,
+            "idle_monitoring_interval": IDLE_MONITORING_INTERVAL
         }
         
         return jsonify(health_status), 200
@@ -1665,7 +1839,10 @@ def transcribe_audio():
                 os.remove(f_path)
         print(f"[{unique_id}] 临时文件已清理。")
         
-        # --- 7. 强制清理内存，避免累积 ---
+        # --- 7. 立即执行请求后清理 ---
+        immediate_post_request_cleanup()
+        
+        # --- 8. 强制清理内存，避免累积 ---
         print(f"[{unique_id}] 执行最终内存清理...")
         if cuda_available:
             allocated_before, _, total = get_gpu_memory_usage()
@@ -1674,7 +1851,18 @@ def transcribe_audio():
             memory_before = psutil.virtual_memory()
             print(f"[{unique_id}] 清理前内存使用: {memory_before.used/1024**3:.2f}GB / {memory_before.total/1024**3:.2f}GB")
         
-        aggressive_memory_cleanup()
+        # 检查是否需要超级激进清理
+        needs_ultra_cleanup = False
+        if cuda_available and allocated_before > MEMORY_USAGE_ALERT_THRESHOLD_GB:
+            needs_ultra_cleanup = True
+        elif not cuda_available and memory_before.used/1024**3 > MEMORY_USAGE_ALERT_THRESHOLD_GB:
+            needs_ultra_cleanup = True
+        
+        if needs_ultra_cleanup and ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION:
+            print(f"[{unique_id}] 内存使用过高，执行超级激进清理")
+            ultra_aggressive_memory_cleanup()
+        else:
+            aggressive_memory_cleanup()
         
         if cuda_available:
             allocated_after, _, total = get_gpu_memory_usage()
@@ -2136,10 +2324,14 @@ if __name__ == '__main__':
     print("")
     print("=== 闲置资源优化配置 ===")
     print(f"模型闲置超时: {IDLE_TIMEOUT_MINUTES} 分钟")
+    print(f"自动模型卸载阈值: {AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES} 分钟")
     print(f"闲置内存清理间隔: {IDLE_MEMORY_CLEANUP_INTERVAL} 秒")
     print(f"深度清理阈值: {IDLE_DEEP_CLEANUP_THRESHOLD} 秒")
     print(f"闲置CPU优化: {'启用' if ENABLE_IDLE_CPU_OPTIMIZATION else '禁用'}")
     print(f"监控间隔: {IDLE_MONITORING_INTERVAL} 秒")
+    print(f"超级激进优化: {'启用' if ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION else '禁用'}")
+    print(f"请求后立即清理: {'启用' if IMMEDIATE_CLEANUP_AFTER_REQUEST else '禁用'}")
+    print(f"内存告警阈值: {MEMORY_USAGE_ALERT_THRESHOLD_GB:.1f}GB")
     # 初始化CUDA兼容性检查
     print("正在检查CUDA兼容性...")
     cuda_available = check_cuda_compatibility()
