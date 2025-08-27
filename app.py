@@ -24,11 +24,12 @@ else:
 
 host = '0.0.0.0'
 port = 5092
-threads = 4
+# 线程数默认更省内存，如需并发可再提升
+threads = int(os.environ.get('APP_THREADS', '2'))
 # 默认按照N分钟将音视频裁切为多段，减少显存占用。现在可以通过环境变量 CHUNK_MINITE 来调整。
 # 8G显存建议设置为 10-15 分钟以获得最佳性能。
 CHUNK_MINITE = int(os.environ.get('CHUNK_MINITE', '10'))
-# 服务闲置N分钟后自动卸载模型以释放显存，设置为0则禁用
+# 服务闲置N分钟后自动卸载模型以释放显存，设置为0则禁用（默认30分钟）
 IDLE_TIMEOUT_MINUTES = int(os.environ.get('IDLE_TIMEOUT_MINUTES', '30'))
 # 懒加载开关，默认为 true。设置为 'false' 可在启动时预加载模型。
 ENABLE_LAZY_LOAD = os.environ.get('ENABLE_LAZY_LOAD', 'true').lower() not in ['false', '0', 'f']
@@ -64,6 +65,8 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import gc
 import psutil
+import ctypes
+import ctypes.util
 try:
     # huggingface_hub may not be present in the editor environment; import defensively
     from huggingface_hub import HfApi, hf_hub_download  # type: ignore
@@ -97,6 +100,7 @@ AGGRESSIVE_MEMORY_CLEANUP = os.environ.get('AGGRESSIVE_MEMORY_CLEANUP', 'true').
 ENABLE_GRADIENT_CHECKPOINTING = os.environ.get('ENABLE_GRADIENT_CHECKPOINTING', 'true').lower() in ['true', '1', 't']
 MAX_CHUNK_MEMORY_MB = int(os.environ.get('MAX_CHUNK_MEMORY_MB', '1500'))
 FORCE_CLEANUP_THRESHOLD = float(os.environ.get('FORCE_CLEANUP_THRESHOLD', '0.8'))
+ENABLE_MALLOC_TRIM = os.environ.get('ENABLE_MALLOC_TRIM', 'true').lower() in ['true', '1', 't']
 
 # 闲置时资源优化配置
 IDLE_MEMORY_CLEANUP_INTERVAL = int(os.environ.get('IDLE_MEMORY_CLEANUP_INTERVAL', '120'))  # 闲置时内存清理间隔(秒)，默认2分钟
@@ -104,8 +108,8 @@ IDLE_DEEP_CLEANUP_THRESHOLD = int(os.environ.get('IDLE_DEEP_CLEANUP_THRESHOLD', 
 ENABLE_IDLE_CPU_OPTIMIZATION = os.environ.get('ENABLE_IDLE_CPU_OPTIMIZATION', 'true').lower() in ['true', '1', 't']
 IDLE_MONITORING_INTERVAL = int(os.environ.get('IDLE_MONITORING_INTERVAL', '30'))  # 闲置监控间隔(秒)，默认30秒
 # 内存优化配置 - 简化为合理默认值，无需用户配置
-ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION = os.environ.get('ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION', 'false').lower() in ['true', '1', 't']
-IMMEDIATE_CLEANUP_AFTER_REQUEST = os.environ.get('IMMEDIATE_CLEANUP_AFTER_REQUEST', 'false').lower() in ['true', '1', 't']
+ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION = os.environ.get('ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION', 'true').lower() in ['true', '1', 't']
+IMMEDIATE_CLEANUP_AFTER_REQUEST = os.environ.get('IMMEDIATE_CLEANUP_AFTER_REQUEST', 'true').lower() in ['true', '1', 't']
 MEMORY_USAGE_ALERT_THRESHOLD_GB = float(os.environ.get('MEMORY_USAGE_ALERT_THRESHOLD_GB', '12.0'))  # 设置较高的阈值，避免频繁清理
 AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES = int(os.environ.get('AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES', '30'))  # 保持与IDLE_TIMEOUT_MINUTES一致
 
@@ -576,6 +580,35 @@ def aggressive_memory_cleanup():
             torch.cuda.empty_cache()
         except Exception as e:
             print(f"⚠️ CUDA缓存清理失败: {e}")
+    # 归还 glibc 内存给操作系统
+    try_malloc_trim()
+
+def try_malloc_trim():
+    """尝试通过 glibc 的 malloc_trim 或可用的分配器将空闲内存还给操作系统。
+    - 对于 glibc: 调用 malloc_trim(0)
+    - 若启用了 jemalloc 且可用，可尝试触发背景释放（通常由 MALLOC_CONF 管理）
+    """
+    if not ENABLE_MALLOC_TRIM:
+        return
+    # glibc
+    try:
+        libc_path = ctypes.util.find_library('c') or 'libc.so.6'
+        libc = ctypes.CDLL(libc_path)
+        # malloc_trim(size_t) -> int
+        try:
+            libc.malloc_trim.argtypes = [ctypes.c_size_t]
+            libc.malloc_trim.restype = ctypes.c_int
+        except Exception:
+            pass
+        res = libc.malloc_trim(0)
+        if res != 0:
+            print("✅ 已调用 malloc_trim 归还空闲内存")
+        else:
+            # 返回 0 也可能表示没有可修剪的碎片
+            print("ℹ️ malloc_trim 已调用，无可修剪或已最优")
+    except Exception as e:
+        # jemalloc 可选处理（若通过 LD_PRELOAD 启用，通常由 background_thread 自动回收）
+        print(f"⚠️ malloc_trim 调用失败或不可用: {e}")
 
 def idle_deep_memory_cleanup():
     """闲置时深度内存清理函数 - 简化为基本清理"""
@@ -601,6 +634,7 @@ def idle_deep_memory_cleanup():
     # 垃圾回收
     for _ in range(2):
         gc.collect()
+    try_malloc_trim()
     
     if cuda_available:
         allocated, reserved, total = get_gpu_memory_usage()
@@ -623,6 +657,7 @@ def immediate_post_request_cleanup():
     
     # 基本垃圾回收
     gc.collect()
+    try_malloc_trim()
 
 def check_memory_usage_and_cleanup():
     """检查内存使用情况并在必要时触发清理 - 仅在极高使用时清理"""
@@ -898,6 +933,7 @@ def unload_model():
             
             # 卸载后立即执行深度清理
             idle_deep_memory_cleanup()
+            try_malloc_trim()
             
             # 显示卸载后的显存使用
             if cuda_available:
@@ -1104,20 +1140,18 @@ def detect_silences_with_ffmpeg(source_wav: str) -> list:
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """
-    健康检查端点 - 用于Docker健康检查和服务监控
-    """
+    """健康检查端点 - 用于Docker健康检查和服务监控"""
     try:
         current_time = datetime.datetime.now()
-        # 检查基本服务状态
+        # 基本状态
         health_status: Dict[str, Any] = {
             "status": "healthy",
             "timestamp": current_time.isoformat(),
             "service": "parakeet-api",
-            "version": "1.0.0"
+            "version": "1.0.0",
         }
-        
-        # 检查CUDA状态
+
+        # GPU 信息
         global cuda_available
         if cuda_available:
             try:
@@ -1127,33 +1161,21 @@ def health_check():
                     "memory_allocated_gb": round(allocated, 2),
                     "memory_reserved_gb": round(reserved, 2),
                     "memory_total_gb": round(total, 2),
-                    "memory_usage_percent": round((allocated/total)*100, 1) if total > 0 else 0,
-                    "memory_reserved_percent": round((reserved/total)*100, 1) if total > 0 else 0
+                    "memory_usage_percent": round((allocated / total) * 100, 1) if total > 0 else 0,
+                    "memory_reserved_percent": round((reserved / total) * 100, 1) if total > 0 else 0,
                 }
             except Exception as e:
-                health_status["gpu"] = {
-                    "available": True,
-                    "error": str(e)
-                }
+                health_status["gpu"] = {"available": True, "error": str(e)}
         else:
-            health_status["gpu"] = {
-                "available": False,
-                "mode": "cpu"
-            }
-        
-        # 检查模型状态和闲置信息
-        model_info = {
-            "loaded": asr_model is not None,
-            "lazy_load": ENABLE_LAZY_LOAD
-        }
-        
+            health_status["gpu"] = {"available": False, "mode": "cpu"}
+
+        # 模型与闲置信息
+        model_info: Dict[str, Any] = {"loaded": asr_model is not None, "lazy_load": ENABLE_LAZY_LOAD}
         if last_request_time is not None:
             idle_seconds = (current_time - last_request_time).total_seconds()
             model_info["last_request_time"] = last_request_time.isoformat()
             model_info["idle_duration_seconds"] = round(idle_seconds, 1)
             model_info["idle_duration_minutes"] = round(idle_seconds / 60, 1)
-            
-            # 添加闲置状态分类
             if idle_seconds > IDLE_TIMEOUT_MINUTES * 60:
                 model_info["idle_status"] = "ready_for_unload"
             elif idle_seconds > IDLE_DEEP_CLEANUP_THRESHOLD:
@@ -1164,37 +1186,34 @@ def health_check():
                 model_info["idle_status"] = "active"
         else:
             model_info["idle_status"] = "no_requests" if asr_model is not None else "unloaded"
-        
         health_status["model"] = model_info
-        
-        # 检查系统资源使用
+
+        # 系统资源
         memory = psutil.virtual_memory()
         try:
             cpu_percent = psutil.cpu_percent(interval=0.1)
-        except:
+        except Exception:
             cpu_percent = 0.0
-            
         health_status["system"] = {
             "memory_usage_percent": memory.percent,
             "memory_available_gb": round(memory.available / 1024**3, 2),
             "memory_total_gb": round(memory.total / 1024**3, 2),
-            "cpu_usage_percent": round(cpu_percent, 1)
+            "cpu_usage_percent": round(cpu_percent, 1),
         }
-        
-        # 添加基本优化配置状态
+
+        # 优化配置摘要
         health_status["optimization"] = {
             "aggressive_memory_cleanup": AGGRESSIVE_MEMORY_CLEANUP,
             "idle_timeout_minutes": IDLE_TIMEOUT_MINUTES,
-            "idle_memory_cleanup_interval": IDLE_MEMORY_CLEANUP_INTERVAL
+            "idle_memory_cleanup_interval": IDLE_MEMORY_CLEANUP_INTERVAL,
         }
-        
+
         return jsonify(health_status), 200
-        
     except Exception as e:
         error_status = {
             "status": "unhealthy",
             "timestamp": datetime.datetime.now().isoformat(),
-            "error": str(e)
+            "error": str(e),
         }
         return jsonify(error_status), 500
 
@@ -1735,6 +1754,7 @@ def transcribe_audio():
         
         # 执行标准内存清理
         aggressive_memory_cleanup()
+        try_malloc_trim()
         
         if cuda_available:
             allocated_after, _, total = get_gpu_memory_usage()
@@ -1944,6 +1964,54 @@ def split_and_wrap_long_subtitles(
     # 最终保证按开始时间排序
     new_segments.sort(key=lambda s: (s.get('start', 0.0), s.get('end', 0.0)))
     return new_segments
+
+
+@app.route('/admin/unload', methods=['POST'])
+def admin_unload_model():
+    """手动卸载模型并执行深度清理。
+    - 若设置了 API_KEY，则需要 Bearer 认证。
+    - 返回当前内存/显存使用信息。
+    """
+    if API_KEY:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"error": "Authorization header is missing or invalid."}), 401
+        provided_key = auth_header.split(' ')[1]
+        if provided_key != API_KEY:
+            return jsonify({"error": "Invalid API key."}), 401
+
+    prev_gpu = None
+    if cuda_available:
+        try:
+            prev_gpu = get_gpu_memory_usage()
+        except Exception:
+            prev_gpu = None
+
+    unload_model()
+    try_malloc_trim()
+
+    resp: Dict[str, Any] = {"status": "unloaded"}
+    try:
+        mem = psutil.virtual_memory()
+        resp["system_memory_gb"] = {
+            "used": round(mem.used/1024**3, 2),
+            "total": round(mem.total/1024**3, 2),
+            "percent": mem.percent,
+        }
+    except Exception:
+        pass
+    if cuda_available:
+        try:
+            alloc, _, total = get_gpu_memory_usage()
+            resp["gpu_memory_gb"] = {
+                "allocated": round(alloc, 2),
+                "total": round(total, 2),
+            }
+            if prev_gpu:
+                resp["gpu_freed_gb"] = round(max(prev_gpu[0]-alloc, 0.0), 2)
+        except Exception:
+            pass
+    return jsonify(resp), 200
 
 def configure_decoding_strategy(model):
     """配置 NeMo 模型的解码策略（若支持）。

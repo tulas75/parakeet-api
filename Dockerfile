@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     gosu \
     libsndfile1 \
+    libjemalloc2 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # 升级pip到最新版本
@@ -64,6 +65,10 @@ ENV HF_HOME=/app/models
 ENV HF_HUB_DISABLE_SYMLINKS_WARNING=true
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.85
 ENV CUDA_LAUNCH_BLOCKING=0
+# glibc 分配器调优：减少 arena 数，降低 RSS 膨胀
+ENV MALLOC_ARENA_MAX=2
+# 默认启用 jemalloc（用户无需配置），如不需要可在运行时设置 USE_JEMALLOC=false 禁用
+ENV USE_JEMALLOC=true
 
 # 创建启动脚本
 RUN echo '#!/bin/bash\n\
@@ -113,6 +118,18 @@ fi\n\
 # 设置环境变量确保配置目录正确\n\
 export MPLCONFIGDIR=/home/appuser/.config/matplotlib\n\
 export HOME=/home/appuser\n\
+\n\
+# 可选启用 jemalloc 以更积极地归还空闲内存\n\
+if [ "+${USE_JEMALLOC}+" = "+true+" ]; then\n\
+    if [ -f /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 ]; then\n\
+        export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}\n\
+        # 背景线程回收、衰减配置（更积极释放到 OS）\n\
+        export MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\n\
+        echo "使用 jemalloc: $LD_PRELOAD"\n\
+    else\n\
+        echo "未找到 jemalloc，跳过启用"\n\
+    fi\n\
+fi\n\
 \n\
 # 验证Python包是否可用\n\
 echo "验证Python包..."\n\
