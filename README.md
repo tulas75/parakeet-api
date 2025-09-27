@@ -1,307 +1,273 @@
 # Parakeet API (Docker)
 
-基于 NVIDIA NeMo 的中文/多语种语音识别服务，提供与 OpenAI Whisper 兼容的 `/v1/audio/transcriptions` 接口。已打包为支持 GPU 的 Docker 镜像，可一键运行。
+Chinese/multilingual speech recognition service based on NVIDIA NeMo, providing an OpenAI Whisper-compatible `/v1/audio/transcriptions` interface. Packaged as a GPU-enabled Docker image for one-click deployment.
 
-- 预置模型：默认 `nvidia/parakeet-tdt-0.6b-v3`
-- 支持25种语言，提供自动语言检测功能
-- 支持长音频分片与重叠拼接，提供 SRT/VTT/verbose_json 等输出
-- 自动检测 CUDA 兼容性：不兼容或无 GPU 时降级 CPU 模式（速度较慢）
-- OpenAI Whisper API 兼容格式，包括错误响应
-
-
-## 目录
-
-- 快速开始（Windows PowerShell）
-- 先决条件
-- 使用预构建镜像运行
-- 从源码构建并运行
-- API 使用示例
-- 语言检测与支持
-- 配置与环境变量
-- 端口、卷与文件结构
-- 健康检查与监控
-- 常见问题与排障
-- 许可与致谢
+- Pre-configured model: default `nvidia/parakeet-tdt-0.6b-v3`
+- Supports 25 languages with automatic language detection
+- Supports long audio chunking with overlapping stitching, provides SRT/VTT/verbose_json output formats
+- Automatically detects CUDA compatibility: falls back to CPU mode when incompatible or no GPU is present (slower)
+- OpenAI Whisper API compatible format, including error responses
 
 
-## 快速开始（Windows PowerShell）
+## Table of Contents
 
-1. 准备目录并启动容器（使用预构建镜像）
+- Quick Start (PowerShell)
+- Prerequisites
+- Running with Pre-built Images
+- Building and Running from Source
+- API Usage Examples
+- Language Detection and Support
+- Configuration and Environment Variables
+- Ports, Volumes and File Structure
+- Health Checks and Monitoring
+- Frequently Asked Questions and Troubleshooting
+- License and Acknowledgements
 
-```powershell
-# 在仓库根目录执行
-mkdir .\models -Force; mkdir .\temp_uploads -Force
 
-# 启动（需要已安装 NVIDIA Container Toolkit）
+## Quick Start\n\n1. Prepare directories and start the container (using pre-built image)\n\n```bash\n# Execute in the repository root directory\nmkdir -p ./models ./temp_uploads\n\n# Start (requires NVIDIA Container Toolkit installed)\ndocker compose up -d\n\n# View logs (optional)\ndocker compose logs -f\n```\n\n1. Health checks\n\n- Simple health: `http://localhost:5092/health/simple`\n- Detailed health: `http://localhost:5092/health`\n\n1. Test the API (example: JSON text output)\n\n```bash\n# Example using curl\ncurl -X POST \"http://localhost:5092/v1/audio/transcriptions\" \\\n  -F \"file=@/path/to/audio.mp3\" \\\n  -F \"model=whisper-1\" \\\n  -F \"response_format=json\"\n```\n\n> If API Key is enabled, add `-H \"Authorization: Bearer YOUR_API_KEY\"`.\n\n
+
+
+## Prerequisites
+
+- Operating System: Linux/macOS/Windows
+- Docker: Docker Desktop or Docker Engine (Compose V2)
+- GPU (optional but recommended):
+  - NVIDIA GPU with drivers installed (recommended 535+), and [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed
+  - Image is based on `nvidia/cuda:13.0.0-runtime-ubuntu22.04`, requiring compatible drivers
+
+Can also run without GPU (automatic CPU mode), but inference speed will be significantly slower.
+
+
+## Running with Pre-built Images
+
+The project provides `docker-compose.yml` which by default pulls the image `ghcr.io/fqscfqj/parakeet-api-docker:full`.
+
+```bash
+mkdir -p ./models ./temp_uploads
 docker compose up -d
-
-# 查看日志（可选）
-docker compose logs -f
-```
-
-1. 健康检查
-
-- 简单健康：`http://localhost:5092/health/simple`
-- 详细健康：`http://localhost:5092/health`
-
-1. 试用 API（示例：JSON 文本输出）
-
-```powershell
-# 使用 curl.exe（建议在 PowerShell 下显式调用 curl.exe）
-$audio = "C:\\path\\to\\audio.mp3"
-curl.exe -X POST "http://localhost:5092/v1/audio/transcriptions" \
-  -F "file=@$audio" \
-  -F "model=whisper-1" \
-  -F "response_format=json"
-```
-
-> 如启用 API Key，需添加 `-H "Authorization: Bearer YOUR_API_KEY"`。
-
-
-## 先决条件
-
-- 操作系统：Linux/Windows（本文示例以 Windows PowerShell 为主）
-- Docker：Docker Desktop 或 Docker Engine（Compose V2）
-- GPU（可选但推荐）：
-  - 已安装 NVIDIA 显卡与驱动（建议 535+），并安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-  - 镜像基于 `nvidia/cuda:13.0.0-runtime-ubuntu22.04`，需满足对应驱动要求
-
-无 GPU 时也可运行（自动 CPU 模式），但推理速度会显著降低。
-
-
-## 使用预构建镜像运行
-
-项目已提供 `docker-compose.yml`，默认拉取镜像 `ghcr.io/fqscfqj/parakeet-api-docker:full`。
-
-```powershell
-mkdir .\models -Force; mkdir .\temp_uploads -Force
-docker compose up -d
-# 更新镜像
+# To update the image
 # docker compose pull; docker compose up -d
 ```
 
-Compose 主要配置：
+Compose main configuration:
 
-- 端口映射：`5092:5092`
-- 卷：
-  - `./models:/app/models`（模型与缓存）
-  - `./temp_uploads:/app/temp_uploads`（临时转码与切片文件）
-- GPU：通过 `deploy.resources.reservations.devices` 申请全部可用 GPU
+- Port mapping: `5092:5092`
+- Volumes:
+  - `./models:/app/models` (models and cache)
+  - `./temp_uploads:/app/temp_uploads` (temporary transcoding and chunking files)
+- GPU: Requests all available GPUs via `deploy.resources.reservations.devices`
 
 
-## 从源码构建并运行
+## Building and Running from Source
 
-如果需要定制 Dockerfile 或加速国内构建，可用 `docker-compose-build.yml`：
+If you need to customize the Dockerfile or accelerate domestic builds, use `docker-compose-build.yml`:
 
-```powershell
-mkdir .\models -Force; mkdir .\temp_uploads -Force
+```bash
+mkdir -p ./models ./temp_uploads
 docker compose -f docker-compose-build.yml up -d --build
 ```
 
-构建镜像包含：
+Built image includes:
 
-- Python3.10 + Pip
-- PyTorch/cu130 + torchaudio（来自官方 CUDA 13.0 轮子）
-- NeMo ASR 及依赖、FFmpeg、健康检查脚本
+- Python 3.10 + Pip
+- PyTorch/cu130 + torchaudio (from official CUDA 13.0 wheels)
+- NeMo ASR and dependencies, FFmpeg, health check script
 
 
-## API 使用示例
+## API Usage Examples
 
-- 端点：`POST /v1/audio/transcriptions`
-- 字段（multipart/form-data）：
-  - `file`：音/视频文件
-  - `model`：兼容字段，默认 `whisper-1`
-  - `response_format`：`json` | `text` | `srt` | `vtt` | `verbose_json`
-  - `language`：可选，默认自动
-  - `prompt`、`temperature`：可选
+- Endpoint: `POST /v1/audio/transcriptions`
+- Fields (multipart/form-data):
+  - `file`: Audio/video file
+  - `model`: Compatibility field, default `whisper-1`
+  - `response_format`: `json` | `text` | `srt` | `vtt` | `verbose_json`
+  - `language`: Optional, default automatic
+  - `prompt`, `temperature`: Optional
 
-示例：返回 SRT 字幕
+Example: Return SRT subtitles
 
-```powershell
-$audio = "C:\\path\\to\\audio.wav"
-curl.exe -X POST "http://localhost:5092/v1/audio/transcriptions" \
-  -F "file=@$audio" \
+```bash
+curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
+  -F "file=@/path/to/audio.wav" \
   -F "model=whisper-1" \
   -F "response_format=srt"
 ```
 
-启用 API Key：
+With API Key enabled:
 
-```powershell
-# 在 docker-compose.yml 中设置环境变量 API_KEY 后，调用时带上 Header
-$audio = "C:\\path\\to\\audio.mp3"
-$apiKey = "YOUR_API_KEY"
-curl.exe -X POST "http://localhost:5092/v1/audio/transcriptions" \
-  -H "Authorization: Bearer $apiKey" \
-  -F "file=@$audio" -F "response_format=json"
+```bash
+# After setting environment variable API_KEY in docker-compose.yml, include header when calling
+curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "file=@/path/to/audio.mp3" -F "response_format=json"
 ```
 
-## 语言检测与支持
+## Language Detection and Support
 
-### 支持的语言（25种）
+### Supported Languages (25)
 
-本API支持以下25种语言的转写（基于 parakeet-tdt-0.6b-v3 模型）：
+This API supports transcription of the following 25 languages (based on parakeet-tdt-0.6b-v3 model):
 
-| 语言代码 | 语言名称 | 语言代码 | 语言名称 | 语言代码 | 语言名称 |
-|---------|---------|---------|---------|---------|---------|
-| bg | 保加利亚语 | hr | 克罗地亚语 | cs | 捷克语 |
-| da | 丹麦语 | nl | 荷兰语 | en | 英语 |
-| et | 爱沙尼亚语 | fi | 芬兰语 | fr | 法语 |
-| de | 德语 | el | 希腊语 | hu | 匈牙利语 |
-| it | 意大利语 | lv | 拉脱维亚语 | lt | 立陶宛语 |
-| mt | 马耳他语 | pl | 波兰语 | pt | 葡萄牙语 |
-| ro | 罗马尼亚语 | sk | 斯洛伐克语 | sl | 斯洛文尼亚语 |
-| es | 西班牙语 | sv | 瑞典语 | ru | 俄语 |
-| uk | 乌克兰语 | | | | |
+| Language Code | Language Name | Language Code | Language Name | Language Code | Language Name |
+|---------------|---------------|---------------|---------------|---------------|---------------|
+| bg | Bulgarian | hr | Croatian | cs | Czech |
+| da | Danish | nl | Dutch | en | English |
+| et | Estonian | fi | Finnish | fr | French |
+| de | German | el | Greek | hu | Hungarian |
+| it | Italian | lv | Latvian | lt | Lithuanian |
+| mt | Maltese | pl | Polish | pt | Portuguese |
+| ro | Romanian | sk | Slovak | sl | Slovenian |
+| es | Spanish | sv | Swedish | ru | Russian |
+| uk | Ukrainian | | | | |
 
-### 自动语言检测
+### Automatic Language Detection
 
-当请求中未指定 `language` 参数时，系统会自动检测音频语言：
+When the `language` parameter is not specified in the request, the system automatically detects the audio language:
 
-1. **检测流程**：
-   - 提取音频前段（默认45秒）进行快速转写
-   - 使用 langdetect 库分析转写文本的语言
-   - 如果检测到支持的语言，则使用该语言进行完整转写
-   - 如果检测到不支持的语言，根据 `ENABLE_AUTO_LANGUAGE_REJECTION` 设置处理
+1. **Detection process**:
+   - Extract the beginning of the audio (default 45 seconds) for quick transcription
+   - Use the langdetect library to analyze the language of the transcribed text
+   - If a supported language is detected, use that language for full transcription
+   - If an unsupported language is detected, handle according to `ENABLE_AUTO_LANGUAGE_REJECTION` setting
 
-2. **处理规则**：
-   - **显式指定语言**：验证语言是否在支持列表中，不支持则返回 OpenAI 格式错误
-   - **自动检测支持的语言**：使用检测到的语言进行转写
-   - **自动检测不支持的语言**：
-     - 如果 `ENABLE_AUTO_LANGUAGE_REJECTION=true`：返回 OpenAI 格式错误
-     - 如果 `ENABLE_AUTO_LANGUAGE_REJECTION=false`：默认使用英语进行转写
+2. **Processing rules**:
+   - **Explicitly specified language**: Verify if the language is in the supported list; return OpenAI format error if not supported
+   - **Automatically detected supported language**: Use the detected language for transcription
+   - **Automatically detected unsupported language**:
+     - If `ENABLE_AUTO_LANGUAGE_REJECTION=true`: return OpenAI format error
+     - If `ENABLE_AUTO_LANGUAGE_REJECTION=false`: default to English for transcription
 
-3. **响应格式**：
+3. **Response format**:
    ```json
    {
-     "text": "转写文本内容",
-     "language": "auto-detected-lang-code"  // 仅在 verbose_json 格式中返回
+     "text": "transcribed text content",
+     "language": "auto-detected-lang-code"  // Only returned in verbose_json format
    }
    ```
 
-4. **配置选项**：
-   - `ENABLE_AUTO_LANGUAGE_REJECTION`：是否拒绝不支持的语言（默认 `true`）
-   - `LID_CLIP_SECONDS`：用于语言检测的音频片段长度（默认 `45` 秒）
+4. **Configuration options**:
+   - `ENABLE_AUTO_LANGUAGE_REJECTION`: Whether to reject unsupported languages (default `true`)
+   - `LID_CLIP_SECONDS`: Audio clip length for language detection (default `45` seconds)
 
-### 使用示例
+### Usage Examples
 
 ```bash
-# 显式指定支持的语言
+# Explicitly specify a supported language
 curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
   -F "file=@audio.wav" \
   -F "language=en" \
   -F "response_format=json"
 
-# 自动检测语言
+# Automatically detect language
 curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
   -F "file=@audio.wav" \
-  -F "response_format=verbose_json"  # 返回检测到的语言
+  -F "response_format=verbose_json"  # Returns detected language
 
-# 显式指定不支持的语言（返回错误）
+# Explicitly specify an unsupported language (returns error)
 curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
   -F "file=@audio.wav" \
-  -F "language=zh"  # 返回 OpenAI 格式错误响应
+  -F "language=zh"  # Returns OpenAI format error response
 ```
 
 
-## 配置与环境变量
+## Configuration and Environment Variables
 
-常用环境变量（可在 Compose 的 `environment:` 中设置）：
+Common environment variables (can be set in Compose's `environment:`):
 
-- 模型与加载
-  - `MODEL_ID`：默认 `nvidia/parakeet-tdt-0.6b-v3`
-  - `MODEL_LOCAL_PATH`：优先加载本地 `.nemo` 文件路径（挂载到 `./models` 后可指向 `/app/models/xxx.nemo`）
-  - `ENABLE_LAZY_LOAD`：是否懒加载模型（默认 `true`）
-  - `IDLE_TIMEOUT_MINUTES`：闲置自动卸载模型的分钟数，`0` 表示禁用（默认 `30`）
-  - `API_KEY`：若设置，则启用 Bearer Token 认证
-  - `HF_ENDPOINT`：Hugging Face 镜像端点，默认 `https://hf-mirror.com`
+- Model and Loading
+  - `MODEL_ID`: Default `nvidia/parakeet-tdt-0.6b-v3`
+  - `MODEL_LOCAL_PATH`: Priority path to load local `.nemo` file (after mounting to `./models`, can point to `/app/models/xxx.nemo`)
+  - `ENABLE_LAZY_LOAD`: Whether to lazy load model (default `true`)
+  - `IDLE_TIMEOUT_MINUTES`: Minutes to auto-unload model when idle, `0` to disable (default `30`)
+  - `API_KEY`: If set, enables Bearer Token authentication
+  - `HF_ENDPOINT`: Hugging Face mirror endpoint, default `https://hf-mirror.com`
 
-- 性能与显存
-  - `PRESET`：`speed` | `balanced` | `quality` | `simple`（=balanced）。用于在启动时推导参数
-  - `GPU_VRAM_GB`：显存容量（整数，GB）。若不设置，会尝试自动检测
-  - `CHUNK_MINITE`：每段切片时长（分钟，默认 `10`，显存小可调小）
-  - `MAX_CONCURRENT_INFERENCES`：最大并发推理数（默认 `1`）
-  - `GPU_MEMORY_FRACTION`：单进程可使用的显存比例（默认 `0.90~0.95`）
-  - `DECODING_STRATEGY`：`greedy` | `beam`，`RNNT_BEAM_SIZE`：Beam 宽度
-  - `AGGRESSIVE_MEMORY_CLEANUP`：激进显存清理（默认 `true`）
-  - `ENABLE_TENSOR_CORE`、`ENABLE_CUDNN_BENCHMARK`、`TENSOR_CORE_PRECISION`：Tensor Core/Benchmark 相关
+- Performance and GPU Memory
+  - `PRESET`: `speed` | `balanced` | `quality` | `simple` (=balanced). Used to derive parameters at startup
+  - `GPU_VRAM_GB`: GPU memory capacity (integer, GB). If not set, will try to auto-detect
+  - `CHUNK_MINUTE`: Chunk duration per segment (minutes, default `10`, can be lowered for less GPU memory)
+  - `MAX_CONCURRENT_INFERENCES`: Maximum concurrent inferences (default `1`)
+  - `GPU_MEMORY_FRACTION`: GPU memory fraction available to single process (default `0.90~0.95`)
+  - `DECODING_STRATEGY`: `greedy` | `beam`, `RNNT_BEAM_SIZE`: Beam width
+  - `AGGRESSIVE_MEMORY_CLEANUP`: Aggressive GPU memory cleanup (default `true`)
+  - `ENABLE_TENSOR_CORE`, `ENABLE_CUDNN_BENCHMARK`, `TENSOR_CORE_PRECISION`: Tensor Core/Benchmark related
 
-- 闲置资源优化
-  - `IDLE_MEMORY_CLEANUP_INTERVAL`：闲置时内存清理间隔（秒，默认 `120`）
-  - `IDLE_DEEP_CLEANUP_THRESHOLD`：深度清理阈值（秒，默认 `600`）
-  - `ENABLE_IDLE_CPU_OPTIMIZATION`：启用闲置时CPU优化（默认 `true`）
-  - `IDLE_MONITORING_INTERVAL`：闲置监控间隔（秒，默认 `30`）
-  - `ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION`：启用超级激进内存优化（默认 `true`）
-  - `IMMEDIATE_CLEANUP_AFTER_REQUEST`：请求完成后立即清理（默认 `true`）
-  - `MEMORY_USAGE_ALERT_THRESHOLD_GB`：内存使用超过此值时强制清理（默认 `6.0`GB）
-  - `AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES`：模型自动卸载阈值（默认 `10`分钟）
+- Idle Resource Optimization
+  - `IDLE_MEMORY_CLEANUP_INTERVAL`: Idle memory cleanup interval (seconds, default `120`)
+  - `IDLE_DEEP_CLEANUP_THRESHOLD`: Deep cleanup threshold (seconds, default `600`)
+  - `ENABLE_IDLE_CPU_OPTIMIZATION`: Enable CPU optimization when idle (default `true`)
+  - `IDLE_MONITORING_INTERVAL`: Idle monitoring interval (seconds, default `30`)
+  - `ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION`: Enable aggressive memory optimization (default `true`)
+  - `IMMEDIATE_CLEANUP_AFTER_REQUEST`: Immediate cleanup after request completion (default `true`)
+  - `MEMORY_USAGE_ALERT_THRESHOLD_GB`: Force cleanup when memory usage exceeds this value (default `6.0`GB)
+  - `AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES`: Auto model unload threshold (default `10` minutes)
 
-> 💡 **资源优化建议**：新版本大幅增强了闲置优化策略，可将8GB闲置内存降低至2-3GB。启用超级激进优化后，系统会在模型闲置时执行多轮深度清理。可通过 `/health` 端点监控 `idle_status` 和资源使用情况。
+> 💡 **Resource Optimization Tip**: The new version significantly enhances idle optimization strategies, reducing 8GB idle memory to 2-3GB. With aggressive optimization enabled, the system performs multiple rounds of deep cleanup when the model is idle. Monitor `idle_status` and resource usage via the `/health` endpoint.
 
-- 切片与句子完整性
-  - `ENABLE_OVERLAP_CHUNKING`：重叠切片（默认 `true`），`CHUNK_OVERLAP_SECONDS`：重叠秒数（默认 `30`）
-  - `ENABLE_SILENCE_ALIGNED_CHUNKING`：静音对齐分割（默认 `true`）
-  - `SILENCE_THRESHOLD_DB`（默认 `-38dB`）、`MIN_SILENCE_DURATION`（默认 `0.35`）、`SILENCE_MAX_SHIFT_SECONDS`（默认 `2.0`）
+- Chunking and Sentence Integrity
+  - `ENABLE_OVERLAP_CHUNKING`: Overlapping chunks (default `true`), `CHUNK_OVERLAP_SECONDS`: Overlap seconds (default `30`)
+  - `ENABLE_SILENCE_ALIGNED_CHUNKING`: Silence-aligned splitting (default `true`)
+  - `SILENCE_THRESHOLD_DB` (default `-38dB`), `MIN_SILENCE_DURATION` (default `0.35`), `SILENCE_MAX_SHIFT_SECONDS` (default `2.0`)
 
-- 字幕后处理与换行
-  - `MERGE_SHORT_SUBTITLES`（默认 `true`）、`MIN_SUBTITLE_DURATION_SECONDS`（默认 `1.5`）
-  - `SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`、`SHORT_SUBTITLE_MIN_CHARS`、`SUBTITLE_MIN_GAP_SECONDS`
-  - `SPLIT_LONG_SUBTITLES`（默认 `true`）、`MAX_SUBTITLE_DURATION_SECONDS`（默认 `6.0`）
-  - `MAX_SUBTITLE_CHARS_PER_SEGMENT`（默认 `84`）、`PREFERRED_LINE_LENGTH`（默认 `42`）、`MAX_SUBTITLE_LINES`（默认 `2`）
-  - `ENABLE_WORD_TIMESTAMPS_FOR_SPLIT`（默认 `false`）
+- Subtitle Post-processing and Line Breaks
+  - `MERGE_SHORT_SUBTITLES` (default `true`), `MIN_SUBTITLE_DURATION_SECONDS` (default `1.5`)
+  - `SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`, `SHORT_SUBTITLE_MIN_CHARS`, `SUBTITLE_MIN_GAP_SECONDS`
+  - `SPLIT_LONG_SUBTITLES` (default `true`), `MAX_SUBTITLE_DURATION_SECONDS` (default `6.0`)
+  - `MAX_SUBTITLE_CHARS_PER_SEGMENT` (default `84`), `PREFERRED_LINE_LENGTH` (default `42`), `MAX_SUBTITLE_LINES` (default `2`)
+  - `ENABLE_WORD_TIMESTAMPS_FOR_SPLIT` (default `false`)
 
-- 其他
-  - `ENABLE_FFMPEG_DENOISE`（默认 `false`）、`DENOISE_FILTER`：FFmpeg 去噪/均衡/动态范围预处理
-  - `NUMBA_CACHE_DIR`（默认 `/tmp/numba_cache`）：已在镜像中处理并赋予权限
-  - `PUID` / `PGID`：容器启动时会将运行用户切换为指定 UID/GID，便于卷权限管理
+- Other
+  - `ENABLE_FFMPEG_DENOISE` (default `false`), `DENOISE_FILTER`: FFmpeg denoise/equalizer/dynamic range preprocessing
+  - `NUMBA_CACHE_DIR` (default `/tmp/numba_cache`): Already handled and permissions assigned in image
+  - `PUID` / `PGID`: Container will switch running user to specified UID/GID at startup, facilitating volume permission management
 
-> 小贴士：如果只是“能用就行”，先保留默认值；如遇显存不足，可降低 `CHUNK_MINITE`、设为 `PRESET=quality` 或将 `DECODING_STRATEGY=greedy`。
-
-
-## 端口、卷与文件结构
-
-- 端口：容器内监听 `5092`，可在 Compose 中改为其他宿主端口
-- 卷：
-  - `./models:/app/models`：保存/缓存模型（优先加载 `.nemo`）
-  - `./temp_uploads:/app/temp_uploads`：临时转码与切片数据
-- 关键文件：
-  - `app.py`：Flask + Waitress 服务，提供 API 与切片/后处理逻辑
-  - `Dockerfile`：CUDA 13.0 运行时 + 依赖安装 + 健康检查 + 启动脚本
-  - `docker-compose.yml`：使用预构建镜像
-  - `docker-compose-build.yml`：本地构建
-  - `healthcheck.sh`：容器健康检查脚本
+> Tip: If you just want "it to work", keep default values; if encountering GPU memory shortage, reduce `CHUNK_MINUTE`, set `PRESET=quality`, or set `DECODING_STRATEGY=greedy`.
 
 
-## 健康检查与监控
+## Ports, Volumes and File Structure
 
-- `/health/simple`：返回 200 表示存活
-- `/health`：返回 JSON，包含 GPU/CPU、内存与模型加载状态等
-- 容器内置 `HEALTHCHECK`，Compose/编排平台可据此做重启策略
+- Port: Container listens on `5092` internally, can be changed to other host ports in Compose
+- Volumes:
+  - `./models:/app/models`: Save/cache models (prioritizes loading `.nemo`)
+  - `./temp_uploads:/app/temp_uploads`: Temporary transcoding and chunking data
+- Key files:
+  - `app.py`: Flask + Waitress service, providing API and chunking/post-processing logic
+  - `Dockerfile`: CUDA 13.0 runtime + dependency installation + health check + startup script
+  - `docker-compose.yml`: Using pre-built image
+  - `docker-compose-build.yml`: Local building
+  - `healthcheck.sh`: Container health check script
 
 
-## 常见问题与排障（FAQ）
+## Health Checks and Monitoring
 
-- 问：日志提示 “CUDA 不可用/兼容性错误”，服务退回 CPU？
-  - 答：检查主机 NVIDIA 驱动是否满足 CUDA 13.x 运行时需求；确认已安装 NVIDIA Container Toolkit；Compose 中 device 预留是否生效。无法满足时可继续用 CPU，但速度会慢。
+- `/health/simple`: Returns 200 for alive status
+- `/health`: Returns JSON with GPU/CPU, memory and model loading status, etc.
+- Built-in `HEALTHCHECK` in container, Compose/Orchestration platforms can use this for restart policies
 
-- 问：首次启动加载模型很慢或失败？
-  - 答：默认从 Hugging Face 拉取，可设置 `MODEL_LOCAL_PATH` 指向本地 `.nemo`；或配置 `HF_ENDPOINT` 使用镜像。确保 `./models` 卷可写。
 
-- 问：显存不足/频繁 OOM？
-  - 答：将 `CHUNK_MINITE` 调小（如 6~8）；将 `DECODING_STRATEGY=greedy`；`PRESET=quality` 会自动调低并发与显存占比；必要时关闭 `ENABLE_OVERLAP_CHUNKING`。
+## Frequently Asked Questions and Troubleshooting (FAQ)
 
-- 问：想要进一步优化闲置时的资源占用？
-  - 答：新版提供了超级激进的内存优化策略：
-    - `ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION=true`：启用超级激进内存清理
-    - `IMMEDIATE_CLEANUP_AFTER_REQUEST=true`：请求完成后立即清理
-    - `MEMORY_USAGE_ALERT_THRESHOLD_GB=6.0`：内存超过6GB时自动强制清理
-    - `AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES=10`：模型闲置10分钟后自动卸载
-    - `IDLE_MEMORY_CLEANUP_INTERVAL=120`：每2分钟执行内存清理
-    - `IDLE_DEEP_CLEANUP_THRESHOLD=600`：闲置10分钟后执行深度清理
-    - `IDLE_MONITORING_INTERVAL=30`：每30秒检查一次闲置状态
+- Q: Log indicates "CUDA unavailable/compatibility error", service falls back to CPU?
+  - A: Check that host NVIDIA drivers meet CUDA 13.x runtime requirements; confirm NVIDIA Container Toolkit is installed; verify device reservations in Compose are effective. CPU can be used when requirements cannot be met, but speed will be slower.
 
-- 问：如何解决8GB闲置内存占用问题？
-  - 答：使用以下环境变量配置可将闲置内存大幅降低：
+- Q: First startup model loading is slow or fails?
+  - A: By default pulls from Hugging Face, set `MODEL_LOCAL_PATH` to point to local `.nemo`; or configure `HF_ENDPOINT` to use a mirror. Ensure `./models` volume is writable.
+
+- Q: GPU memory shortage/frequent OOM?
+  - A: Reduce `CHUNK_MINUTE` (e.g. 6~8); set `DECODING_STRATEGY=greedy`; `PRESET=quality` automatically lowers concurrency and GPU memory share; disable `ENABLE_OVERLAP_CHUNKING` if necessary.
+
+- Q: Want to further optimize resource usage when idle?
+  - A: The new version provides aggressive memory optimization strategies:
+    - `ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION=true`: Enable aggressive memory cleanup
+    - `IMMEDIATE_CLEANUP_AFTER_REQUEST=true`: Immediate cleanup after request completion
+    - `MEMORY_USAGE_ALERT_THRESHOLD_GB=6.0`: Auto force cleanup when memory exceeds 6GB
+    - `AUTO_MODEL_UNLOAD_THRESHOLD_MINUTES=10`: Auto unload model after 10 minutes of idleness
+    - `IDLE_MEMORY_CLEANUP_INTERVAL=120`: Perform memory cleanup every 2 minutes
+    - `IDLE_DEEP_CLEANUP_THRESHOLD=600`: Perform deep cleanup after 10 minutes of idleness
+    - `IDLE_MONITORING_INTERVAL=30`: Check idle status every 30 seconds
+
+- Q: How to solve the 8GB idle memory usage issue?
+  - A: Using the following environment variable configuration can significantly reduce idle memory:
     ```bash
     ENABLE_AGGRESSIVE_IDLE_OPTIMIZATION=true
     MEMORY_USAGE_ALERT_THRESHOLD_GB=4.0
@@ -310,26 +276,26 @@ curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
     IMMEDIATE_CLEANUP_AFTER_REQUEST=true
     ```
 
-- 问：返回的字幕太碎或闪烁？
-  - 答：可调 `MIN_SUBTITLE_DURATION_SECONDS`、`SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`、`SHORT_SUBTITLE_MIN_CHARS`；或关闭 `MERGE_SHORT_SUBTITLES=false`。
+- Q: Returned subtitles are too fragmented or flickering?
+  - A: Adjust `MIN_SUBTITLE_DURATION_SECONDS`, `SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS`, `SHORT_SUBTITLE_MIN_CHARS`; or disable `MERGE_SHORT_SUBTITLES=false`.
 
-- 问：端口冲突？
-  - 答：修改 Compose 的 `ports` 映射，例如 `"18080:5092"`。
+- Q: Port conflict?
+  - A: Modify the Compose `ports` mapping, for example `"18080:5092"`.
 
-- 问：权限问题（Windows 卷）？
-  - 答：可通过设置 `PUID` / `PGID`（Linux 更常用）或确保 Docker Desktop 共享磁盘权限正常。遇到权限受限时，删除卷目录后重建也可缓解。
+- Q: Permission issues (volume)?
+  - A: Can set `PUID`/`PGID` or ensure Docker Desktop shared disk permissions are correct. When encountering permission restrictions, deleting and rebuilding the volume directory can also help.
 
 
-## 许可与致谢
+## License and Acknowledgements
 
-- 本项目：见 `LICENSE`
-- 模型与依赖：NVIDIA NeMo（ASR）、PyTorch、FFmpeg、Hugging Face 等开源生态
+- This project: see `LICENSE`
+- Models and dependencies: NVIDIA NeMo (ASR), PyTorch, FFmpeg, Hugging Face and other open-source ecosystems
 
 
 ---
-完成度与验证
+Completion and Verification
 
-- 构建：Docker/Compose 清单已就绪
-- 运行：提供 GPU/CPU 双路径与健康检查
-- 用法：给出 PowerShell 友好命令与 curl 示例
-- 覆盖需求：已新增用户友好 README（本文件）
+- Build: Docker/Compose manifests ready
+- Run: Provides GPU/CPU dual paths and health checks
+- Usage: Provides cross-platform commands and curl examples
+- Coverage: Added user-friendly README (this file)
