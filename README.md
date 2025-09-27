@@ -24,7 +24,37 @@ Chinese/multilingual speech recognition service based on NVIDIA NeMo, providing 
 - License and Acknowledgements
 
 
-## Quick Start\n\n1. Prepare directories and start the container (using pre-built image)\n\n```bash\n# Execute in the repository root directory\nmkdir -p ./models ./temp_uploads\n\n# Start (requires NVIDIA Container Toolkit installed)\ndocker compose up -d\n\n# View logs (optional)\ndocker compose logs -f\n```\n\n1. Health checks\n\n- Simple health: `http://localhost:5092/health/simple`\n- Detailed health: `http://localhost:5092/health`\n\n1. Test the API (example: JSON text output)\n\n```bash\n# Example using curl\ncurl -X POST \"http://localhost:5092/v1/audio/transcriptions\" \\\n  -F \"file=@/path/to/audio.mp3\" \\\n  -F \"model=whisper-1\" \\\n  -F \"response_format=json\"\n```\n\n> If API Key is enabled, add `-H \"Authorization: Bearer YOUR_API_KEY\"`.\n\n
+## Quick Start
+
+1. Prepare directories and start the container (using pre-built image)
+
+```bash
+# Execute in the repository root directory
+mkdir -p ./models ./temp_uploads
+
+# Start (requires NVIDIA Container Toolkit installed)
+docker compose up -d
+
+# View logs (optional)
+docker compose logs -f
+```
+
+1. Health checks
+
+- Simple health: `http://localhost:5092/health/simple`
+- Detailed health: `http://localhost:5092/health`
+
+1. Test the API (example: JSON text output)
+
+```bash
+# Example using curl
+curl -X POST "http://localhost:5092/v1/audio/transcriptions" \
+  -F "file=@/path/to/audio.mp3" \
+  -F "model=whisper-1" \
+  -F "response_format=json"
+```
+
+> If API Key is enabled, add `-H "Authorization: Bearer YOUR_API_KEY"`.
 
 
 ## Prerequisites
