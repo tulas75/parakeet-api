@@ -9,9 +9,9 @@ services:
       - ./models:/app/models
       - ./temp_uploads:/app/temp_uploads
     environment:
-      # 精简变量（更多可选项见 README.md）
+      # Simplified variables (more options in README.md)
       - MODEL_ID=nvidia/parakeet-tdt-0.6b-v3
-      # 如果你已手动下载 .nemo，可指定本地路径优先加载（可留空）
+      # If you have manually downloaded .nemo, specify local path for priority loading (can be empty)
       - MODEL_LOCAL_PATH=
       - ENABLE_LAZY_LOAD=true
       - API_KEY=

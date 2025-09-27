@@ -1,14 +1,14 @@
-# Git 相关
+# Git related
 .git
 .gitignore
 .gitattributes
 
-# Docker 相关
+# Docker related
 Dockerfile*
 docker-compose*
 .dockerignore
 
-# 临时文件和缓存
+# Temporary files and cache
 temp_uploads/
 __pycache__/
 *.pyc
@@ -33,27 +33,27 @@ coverage.xml
 .pytest_cache
 .hypothesis
 
-# IDE 相关
+# IDE related
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS 相关
+# OS related
 .DS_Store
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# 文档和说明
+# Documentation and notes
 README.md
 *.md
 LICENSE
 
-# 可选：模型文件（如果太大可以在运行时挂载）
+# Optional: Model files (can be mounted at runtime if too large)
 # models/
 
-# 测试文件
+# Test files
 test*
 tests/ 

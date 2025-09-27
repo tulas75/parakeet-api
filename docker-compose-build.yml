@@ -5,7 +5,7 @@ services:
     build: 
       context: .
       dockerfile: Dockerfile
-      # 启用BuildKit以获得更好的构建性能和缓存
+      # Enable BuildKit for better build performance and caching
       args:
         BUILDKIT_INLINE_CACHE: 1
     ports:
@@ -14,7 +14,7 @@ services:
       - ./models:/app/models
       - ./temp_uploads:/app/temp_uploads
     environment:
-      # 精简变量（更多可选项见 README.md）
+      # Simplified variables (more options in README.md)
       - MODEL_ID=nvidia/parakeet-tdt-0.6b-v3
       - MODEL_LOCAL_PATH=
       - ENABLE_LAZY_LOAD=true
