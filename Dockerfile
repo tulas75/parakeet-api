@@ -11,18 +11,7 @@ ENV NUMBA_DISABLE_JIT=0
 # 创建非root用户
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# 更新并安装系统依赖（精简：仅运行时必需）
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 python3-pip \
-    # 构建部分需要的开发工具链（用于编译 texterrors 等C++扩展）\
-    build-essential g++ gcc python3-dev pkg-config \
-    ffmpeg \
-    curl \
-    ca-certificates \
-    gosu \
-    libsndfile1 \
-    libjemalloc2 \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Update and install system dependencies (minimal: only runtime required)\nRUN apt-get update && apt-get install -y --no-install-recommends \\\n    python3.10 python3-pip \\\n    # Development toolchain needed for building (for compiling C++ extensions like texterrors)\\\n    build-essential g++ gcc python3-dev pkg-config \\\n    ffmpeg \\\n    curl \\\n    ca-certificates \\\n    gosu \\\n    libsndfile1 \\\n    libjemalloc2 \\\n    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # 升级pip到最新版本
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
@@ -38,14 +27,7 @@ WORKDIR /app
 # 复制requirements.txt
 COPY requirements.txt .
 
-# 统一解析安装：从 CUDA 13.0 的 PyTorch 源获取 GPU 轮子，并同时解析 NeMo 等依赖
-# 保留 PyPI 与 NVIDIA 源作为额外索引，避免解析缺包
-RUN python3 -m pip install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cu130 \
-    --extra-index-url https://pypi.org/simple \
-    --extra-index-url https://pypi.nvidia.com \
-    torch torchaudio -r requirements.txt \
-    && python3 -m pip cache purge
+# Unified installation: get GPU wheels from PyTorch source for CUDA 13.0, and resolve dependencies like NeMo at the same time\n# Keep PyPI and NVIDIA sources as extra indexes to avoid missing packages during resolution\nRUN python3 -m pip install --no-cache-dir \\\n    --index-url https://download.pytorch.org/whl/cu130 \\\n    --extra-index-url https://pypi.org/simple \\\n    --extra-index-url https://pypi.nvidia.com \\\n    torch torchaudio -r requirements.txt \\\n    && python3 -m pip cache purge
 
 # 验证关键包是否安装成功
 RUN python3 -c "import flask, torch, torchaudio, numpy; print('OK:', flask.__version__, torch.__version__, torchaudio.__version__, numpy.__version__)"
@@ -72,29 +54,29 @@ ENV USE_JEMALLOC=true
 
 # 创建启动脚本
 RUN echo '#!/bin/bash\n\
-# 使用环境变量中的UID/GID调整用户权限\n\
+# Adjust user permissions using UID/GID from environment variables\n\
 PUID=${PUID:-1000}\n\
 PGID=${PGID:-1000}\n\
 \n\
-echo "配置用户权限: UID=$PUID, GID=$PGID"\n\
+echo \"Configuring user permissions: UID=$PUID, GID=$PGID\"\n\
 \n\
-# 调整appuser的UID/GID\n\
-if [ "$PUID" != "$(id -u appuser)" ]; then\n\
-    echo "调整appuser UID从 $(id -u appuser) 到 $PUID"\n\
+# Adjust appuser UID/GID\n\
+if [ \"$PUID\" != \"$(id -u appuser)\" ]; then\n\
+    echo \"Adjusting appuser UID from $(id -u appuser) to $PUID\"\n\
     usermod -u $PUID appuser 2>/dev/null || true\n\
 fi\n\
-if [ "$PGID" != "$(id -g appuser)" ]; then\n\
-    echo "调整appuser GID从 $(id -g appuser) 到 $PGID"\n\
+if [ \"$PGID\" != \"$(id -g appuser)\" ]; then\n\
+    echo \"Adjusting appuser GID from $(id -g appuser) to $PGID\"\n\
     groupmod -g $PGID appuser 2>/dev/null || true\n\
     usermod -g $PGID appuser 2>/dev/null || true\n\
 fi\n\
 \n\
-# 创建并设置用户主目录权限\n\
+# Create and set user home directory permissions\n\
 mkdir -p /home/appuser\n\
 chown -R appuser:$PGID /home/appuser\n\
 chmod 755 /home/appuser\n\
 \n\
-# 创建配置目录\n\
+# Create config directories\n\
 mkdir -p /home/appuser/.config/matplotlib\n\
 mkdir -p /home/appuser/.lhotse/tools\n\
 chown -R appuser:$PGID /home/appuser/.config\n\
@@ -102,41 +84,41 @@ chown -R appuser:$PGID /home/appuser/.lhotse\n\
 chmod -R 755 /home/appuser/.config\n\
 chmod -R 755 /home/appuser/.lhotse\n\
 \n\
-# 确保应用目录权限正确\n\
+# Ensure application directory permissions are correct\n\
 chown -R appuser:$PGID /app/temp_uploads\n\
 \n\
-# 确保numba缓存目录权限正确\n\
+# Ensure numba cache directory permissions are correct\n\
 mkdir -p /tmp/numba_cache\n\
 chmod 777 /tmp/numba_cache\n\
 chown -R appuser:$PGID /tmp/numba_cache 2>/dev/null || true\n\
 \n\
-# 如果models目录存在，尝试调整权限\n\
-if [ -d "/app/models" ]; then\n\
+# If models directory exists, try adjusting permissions\n\
+if [ -d \"/app/models\" ]; then\n\
     chown -R appuser:$PGID /app/models 2>/dev/null || true\n\
 fi\n\
 \n\
-# 设置环境变量确保配置目录正确\n\
+# Set environment variables to ensure correct config directory\n\
 export MPLCONFIGDIR=/home/appuser/.config/matplotlib\n\
 export HOME=/home/appuser\n\
 \n\
-# 可选启用 jemalloc 以更积极地归还空闲内存\n\
-if [ "+${USE_JEMALLOC}+" = "+true+" ]; then\n\
+# Optionally enable jemalloc to more actively return free memory\n\
+if [ \"+${USE_JEMALLOC}+\" = \"+true+\" ]; then\n\
     if [ -f /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 ]; then\n\
         export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}\n\
-        # 背景线程回收、衰减配置（更积极释放到 OS）\n\
+        # Background thread recycling, decay configuration (more aggressive release to OS)\n\
         export MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\n\
-        echo "使用 jemalloc: $LD_PRELOAD"\n\
+        echo \"Using jemalloc: $LD_PRELOAD\"\n\
     else\n\
-        echo "未找到 jemalloc，跳过启用"\n\
+        echo \"jemalloc not found, skipping enable\"\n\
     fi\n\
 fi\n\
 \n\
-# 验证Python包是否可用\n\
-echo "验证Python包..."\n\
-python3 -c "import flask; print(\"Flask OK\")" || exit 1\n\
-python3 -c "import torch; print(\"PyTorch OK\")" || exit 1\n\
+# Verify Python packages are available\n\
+echo \"Verifying Python packages...\"\n\
+python3 -c \"import flask; print(\\\"Flask OK\\\")\" || exit 1\n\
+python3 -c \"import torch; print(\\\"PyTorch OK\\\")\" || exit 1\n\
 \n\
-# 切换到appuser并启动应用\n\
+# Switch to appuser and start application\n\
 exec gosu appuser python3 app.py\n\
 ' > /usr/local/bin/start.sh && chmod +x /usr/local/bin/start.sh
 

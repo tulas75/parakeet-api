@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       push_image:
-        description: '是否推送镜像到registry'
+        description: 'Whether to push image to registry'
         required: false
         default: true
         type: boolean
@@ -49,7 +49,7 @@ jobs:
       - name: 🔍 Check push conditions
         id: check-push
         run: |
-          echo "=== 推送条件调试信息 ==="
+          echo "=== Push condition debug info ==="
           echo "Event name: ${{ github.event_name }}"
           echo "Push image input: ${{ github.event.inputs.push_image }}"
           echo "Is default branch: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"
@@ -57,27 +57,27 @@ jobs:
           echo "Actor: ${{ github.actor }}"
           echo ""
           
-          # 计算是否应该推送
+          # Calculate whether to push
           if [[ "${{ github.event_name }}" != "pull_request" ]]; then
             if [[ "${{ github.event_name }}" != "workflow_dispatch" ]] || [[ "${{ github.event.inputs.push_image }}" != "false" ]]; then
               echo "should-push=true" >> $GITHUB_OUTPUT
-              echo "✅ 将推送镜像到 GHCR"
+              echo "✅ Will push image to GHCR"
             else
               echo "should-push=false" >> $GITHUB_OUTPUT
-              echo "❌ 不推送镜像 (手动触发且设置为 false)"
+              echo "❌ Will not push image (manual trigger with false setting)"
             fi
           else
             echo "should-push=false" >> $GITHUB_OUTPUT
-            echo "❌ 不推送镜像 (Pull Request)"
+            echo "❌ Will not push image (Pull Request)"
           fi
 
       - name: 🧹 Free up disk space
         run: |
-          echo "=== 构建前磁盘清理 ==="
+          echo "=== Disk cleanup before build ==="
           df -h
           echo ""
           
-          # 删除不必要的预安装软件和数据
+          # Remove unnecessary pre-installed software and data
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
@@ -90,15 +90,15 @@ jobs:
           sudo rm -rf /usr/local/share/powershell
           sudo rm -rf /usr/share/vim/vim*/doc/*
           
-          # 清理 apt 缓存
+          # Clean up apt cache
           sudo apt-get autoremove -y >/dev/null 2>&1
           sudo apt-get autoclean -y >/dev/null 2>&1
           sudo apt-get clean -y >/dev/null 2>&1
           
-          # 清理Docker缓存
+          # Clean up Docker cache
           docker system prune -a -f --volumes >/dev/null 2>&1 || true
           
-          echo "=== 清理后磁盘使用情况 ==="
+          echo "=== Disk usage after cleanup ==="
           df -h
           echo ""
 
@@ -171,49 +171,49 @@ jobs:
       - name: ✅ Verify push success
         if: ${{ steps.check-push.outputs.should-push == 'true' }}
         run: |
-          echo "=== 验证镜像推送状态 ==="
+          echo "=== Verify image push status ==="
           
-          # 等待一下让镜像完全推送完成
+          # Wait a bit for image to finish pushing completely
           sleep 5
           
-          # 检查镜像是否成功推送到 GHCR
+          # Check if image was successfully pushed to GHCR
           if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest > /dev/null 2>&1; then
-            echo "✅ 镜像已成功推送到 GHCR"
-            echo "🔗 镜像地址: https://github.com/fqscfqj/parakeet-api-docker/pkgs/container/parakeet-api-docker"
+            echo "✅ Image successfully pushed to GHCR"
+            echo "🔗 Image URL: https://github.com/fqscfqj/parakeet-api-docker/pkgs/container/parakeet-api-docker"
           else
-            echo "❌ 镜像推送可能失败，请检查权限和网络"
+            echo "❌ Image push may have failed, please check permissions and network"
             exit 1
           fi
 
-          # 检查 FULL 镜像是否成功推送
+          # Check if FULL image was successfully pushed
           if docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:full > /dev/null 2>&1; then
-            echo "✅ Full 镜像已成功推送到 GHCR (tag: full)"
+            echo "✅ Full image successfully pushed to GHCR (tag: full)"
           else
-            echo "❌ Full 镜像推送可能失败，请检查权限和网络"
+            echo "❌ Full image push may have failed, please check permissions and network"
             exit 1
           fi
 
       - name: 📋 Output image info
         if: ${{ steps.check-push.outputs.should-push == 'true' }}
         run: |
-          echo "## 🐳 Parakeet ASR API Docker镜像构建完成" >> $GITHUB_STEP_SUMMARY
+          echo "## 🐳 Parakeet ASR API Docker Image Build Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**镜像版本:** Full (完整环境版)" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Version:** Full (Complete Environment)" >> $GITHUB_STEP_SUMMARY
           echo "**Dockerfile:** Dockerfile" >> $GITHUB_STEP_SUMMARY
-          echo "**支持平台:** linux/amd64" >> $GITHUB_STEP_SUMMARY
+          echo "**Supported Platform:** linux/amd64" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**📦 GHCR 镜像地址:**" >> $GITHUB_STEP_SUMMARY
+          echo "**📦 GHCR Image URL:**" >> $GITHUB_STEP_SUMMARY
           echo "🔗 https://github.com/fqscfqj/parakeet-api-docker/pkgs/container/parakeet-api-docker" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**标签信息:**" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag Information:**" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**使用方法:**" >> $GITHUB_STEP_SUMMARY
+          echo "**Usage:**" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
           echo "docker run -p 5092:5092 -v ./models:/app/models:ro ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
-          echo "# 或者显式使用 full 标签" >> $GITHUB_STEP_SUMMARY
+          echo "# Or explicitly use full tag" >> $GITHUB_STEP_SUMMARY
           echo "docker run -p 5092:5092 -v ./models:/app/models:ro ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:full" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
@@ -272,14 +272,7 @@ jobs:
 
       - name: 📝 Update package description
         run: |
-          echo "更新镜像描述..."
-          docker buildx imagetools create \
-            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            --annotation "index:org.opencontainers.image.description=🎙️ NeMo Parakeet ASR API - 高性能语音识别服务，支持长音频分片处理、GPU加速和多种输出格式。Slim version with optimized size and performance." \
-            --annotation "index:org.opencontainers.image.documentation=https://github.com/fqscfqj/parakeet-api-docker" \
-            --annotation "index:org.opencontainers.image.source=https://github.com/fqscfqj/parakeet-api-docker" \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          echo "✅ 镜像描述更新完成"
+          echo \"Updating image description...\"\n          docker buildx imagetools create \\\n            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \\\n            --annotation \"index:org.opencontainers.image.description=🎙️ NeMo Parakeet ASR API - High-performance speech recognition service, supporting long audio chunking, GPU acceleration and multiple output formats. Slim version with optimized size and performance.\" \\\n            --annotation \"index:org.opencontainers.image.documentation=https://github.com/fqscfqj/parakeet-api-docker\" \\\n            --annotation \"index:org.opencontainers.image.source=https://github.com/fqscfqj/parakeet-api-docker\" \\\n            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\n          echo \"✅ Image description update complete\"
 
 
 
@@ -292,46 +285,46 @@ jobs:
     steps:
       - name: 📊 Generate summary
         run: |
-          echo "## 🐳 Parakeet ASR API Docker镜像构建完成" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**构建结果:**" >> $GITHUB_STEP_SUMMARY
+          echo \"## 🐳 Parakeet ASR API Docker Image Build Complete\" >> $GITHUB_STEP_SUMMARY
+          echo \"\" >> $GITHUB_STEP_SUMMARY
+          echo \"**Build Results:**\" >> $GITHUB_STEP_SUMMARY
           
-          # 构建结果
-          if [ "${{ needs.build.result }}" = "success" ]; then
-            echo "- ✅ Full版构建: 成功" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.build.result }}" = "skipped" ]; then
-            echo "- ⏭️ Full版构建: 跳过" >> $GITHUB_STEP_SUMMARY
+          # Build results
+          if [ \"${{ needs.build.result }}\" = \"success\" ]; then
+            echo \"- ✅ Full version build: Success\" >> $GITHUB_STEP_SUMMARY
+          elif [ \"${{ needs.build.result }}\" = \"skipped\" ]; then
+            echo \"- ⏭️ Full version build: Skipped\" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- ❌ Full版构建: 失败" >> $GITHUB_STEP_SUMMARY
+            echo \"- ❌ Full version build: Failed\" >> $GITHUB_STEP_SUMMARY
           fi
           
-          # 安全扫描结果
-          if [ "${{ needs.security-scan.result }}" = "success" ]; then
-            echo "- ✅ 安全扫描: 通过" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.security-scan.result }}" = "skipped" ]; then
-            echo "- ⏭️ 安全扫描: 跳过" >> $GITHUB_STEP_SUMMARY
+          # Security scan results
+          if [ \"${{ needs.security-scan.result }}\" = \"success\" ]; then
+            echo \"- ✅ Security scan: Passed\" >> $GITHUB_STEP_SUMMARY
+          elif [ \"${{ needs.security-scan.result }}\" = \"skipped\" ]; then
+            echo \"- ⏭️ Security scan: Skipped\" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- ❌ 安全扫描: 失败" >> $GITHUB_STEP_SUMMARY
+            echo \"- ❌ Security scan: Failed\" >> $GITHUB_STEP_SUMMARY
           fi
           
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**可用镜像:**" >> $GITHUB_STEP_SUMMARY
+          echo \"\" >> $GITHUB_STEP_SUMMARY
+          echo \"**Available Images:**\" >> $GITHUB_STEP_SUMMARY
           
-          # 根据构建结果显示可用镜像
-          if [ "${{ needs.build.result }}" = "success" ]; then
-            echo "- Full版: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\` (同 \`full\`)" >> $GITHUB_STEP_SUMMARY
+          # Show available images based on build results
+          if [ \"${{ needs.build.result }}\" = \"success\" ]; then
+            echo \"- Full version: \\`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\\` (same as \\`full\\`)' >> $GITHUB_STEP_SUMMARY
           fi
           
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**使用方法:**" >> $GITHUB_STEP_SUMMARY
+          echo \"\" >> $GITHUB_STEP_SUMMARY
+          echo \"**Usage:**\" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          if [ "${{ needs.build.result }}" = "success" ]; then
-            echo "# Parakeet ASR API (Full 完整环境版)" >> $GITHUB_STEP_SUMMARY
-            echo "docker run -p 5092:5092 -v ./models:/app/models:ro ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          if [ \"${{ needs.build.result }}\" = \"success\" ]; then
+            echo \"# Parakeet ASR API (Full Complete Environment)\" >> $GITHUB_STEP_SUMMARY
+            echo \"docker run -p 5092:5092 -v ./models:/app/models:ro ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\" >> $GITHUB_STEP_SUMMARY
           fi
           echo '```' >> $GITHUB_STEP_SUMMARY
           
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**镜像说明:**" >> $GITHUB_STEP_SUMMARY
-          echo "- 提供完整运行环境，便于开箱即用" >> $GITHUB_STEP_SUMMARY
-          echo "- 默认标签 \`latest\` 指向 Full 版本" >> $GITHUB_STEP_SUMMARY
+          echo \"\" >> $GITHUB_STEP_SUMMARY
+          echo \"**Image Description:**\" >> $GITHUB_STEP_SUMMARY
+          echo \"- Provides complete runtime environment, easy to use out of the box\" >> $GITHUB_STEP_SUMMARY
+          echo \"- Default tag \\`latest\\` points to Full version\" >> $GITHUB_STEP_SUMMARY
