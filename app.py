@@ -171,8 +171,8 @@ GPU_VRAM_GB_ENV = os.environ.get('GPU_VRAM_GB', '').strip()
 
 
 # Ensure temporary upload directory exists
-if not os.path.exists('/app/temp_uploads'):
-    os.makedirs('/app/temp_uploads')
+if not os.path.exists('./app/temp_uploads'):
+    os.makedirs('./app/temp_uploads')
 
 def setup_tensor_core_optimization():
     """Configure Tensor Core optimization settings"""
@@ -751,9 +751,9 @@ def load_model_if_needed():
                 if model_local_path_env:
                     candidate_local_paths.append(model_local_path_env)
                 # New v3 default filename (if user manually downloaded .nemo)
-                candidate_local_paths.append("/app/models/parakeet-tdt-0.6b-v3.nemo")
+                candidate_local_paths.append("./app/models/parakeet-tdt-0.6b-v3.nemo")
                 # Compatible with old v2 filename (backward compatibility)
-                candidate_local_paths.append("/app/models/parakeet-tdt-0.6b-v2.nemo")
+                candidate_local_paths.append("./app/models/parakeet-tdt-0.6b-v2.nemo")
 
                 model_path = next((p for p in candidate_local_paths if os.path.exists(p)), None)
 
@@ -780,7 +780,7 @@ def load_model_if_needed():
                     else:
                         # Auto-download from HF or try to directly fetch .nemo file to local cache directory
                         print(f"Attempting to get model file from Hugging Face: {model_id}")
-                        os.makedirs('/app/models', exist_ok=True)
+                        os.makedirs('./app/models', exist_ok=True)
                         downloaded_path = None
                         try:
                             if HfApi is None:
@@ -791,7 +791,7 @@ def load_model_if_needed():
                             if nemo_files:
                                 target_fname = nemo_files[0]
                                 print(f"Found remote .nemo file: {target_fname}, starting download...")
-                                downloaded_path = hf_hub_download(repo_id=model_id, filename=target_fname, cache_dir='/app/models')
+                                downloaded_path = hf_hub_download(repo_id=model_id, filename=target_fname, cache_dir='./app/models')
                                 print(f"Model downloaded to: {downloaded_path}")
                             else:
                                 print("No .nemo file found in remote repository, falling back to NeMo.from_pretrained() method to load")
@@ -824,7 +824,7 @@ def load_model_if_needed():
                     else:
                         # Auto-download from HF or try to directly fetch .nemo file to local cache directory (CPU branch)
                         print(f"Attempting to get model file from Hugging Face: {model_id}")
-                        os.makedirs('/app/models', exist_ok=True)
+                        os.makedirs('./app/models', exist_ok=True)
                         downloaded_path = None
                         try:
                             if HfApi is None:
@@ -835,7 +835,7 @@ def load_model_if_needed():
                             if nemo_files:
                                 target_fname = nemo_files[0]
                                 print(f"Found remote .nemo file: {target_fname}, starting download...")
-                                downloaded_path = hf_hub_download(repo_id=model_id, filename=target_fname, cache_dir='/app/models')
+                                downloaded_path = hf_hub_download(repo_id=model_id, filename=target_fname, cache_dir='./app/models')
                                 print(f"Model downloaded to: {downloaded_path}")
                             else:
                                 print("No .nemo file found in remote repository, falling back to NeMo.from_pretrained() method to load")
@@ -880,15 +880,15 @@ def predownload_model_artifacts():
         candidate_local_paths = []
         if model_local_path_env:
             candidate_local_paths.append(model_local_path_env)
-        candidate_local_paths.append('/app/models/parakeet-tdt-0.6b-v3.nemo')
-        candidate_local_paths.append('/app/models/parakeet-tdt-0.6b-v2.nemo')
+        candidate_local_paths.append('./app/models/parakeet-tdt-0.6b-v3.nemo')
+        candidate_local_paths.append('./app/models/parakeet-tdt-0.6b-v2.nemo')
         for p in candidate_local_paths:
             if p and os.path.exists(p):
                 print(f"[predownload] Found local model file, no need to download: {p}")
                 return
 
         # Create cache directory
-        os.makedirs('/app/models', exist_ok=True)
+        os.makedirs('./app/models', exist_ok=True)
 
         # Try to use huggingface_hub to download remote .nemo file (download only, don't restore/load)
         if HfApi is None:
@@ -903,9 +903,9 @@ def predownload_model_artifacts():
                 print(f"[predownload] No .nemo files found in remote repository: {model_id}, skipping pre-download")
                 return
             target_fname = nemo_files[0]
-            print(f"[predownload] Found remote .nemo file: {target_fname}, starting download to /app/models ...")
+            print(f"[predownload] Found remote .nemo file: {target_fname}, starting download to ./app/models ...")
             try:
-                downloaded_path = hf_hub_download(repo_id=model_id, filename=target_fname, cache_dir='/app/models')
+                downloaded_path = hf_hub_download(repo_id=model_id, filename=target_fname, cache_dir='./app/models')
                 if downloaded_path and os.path.exists(downloaded_path):
                     print(f"[predownload] Model file downloaded: {downloaded_path}")
                 else:
@@ -1023,7 +1023,7 @@ def model_cleanup_checker():
 
 # --- Flask 应用初始化 ---
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = '/app/temp_uploads'
+app.config['UPLOAD_FOLDER'] = './app/temp_uploads'
 app.config['MAX_CONTENT_LENGTH'] = 2000 * 1024 * 1024  
 
 # --- 辅助函数 ---
@@ -1244,8 +1244,8 @@ def transcribe_audio():
         # If lazy loading is enabled, load on demand; otherwise, directly use the already loaded global model
         local_asr_model = load_model_if_needed() if ENABLE_LAZY_LOAD else asr_model
         if not local_asr_model:
-             # This case covers both lazy loading failure and pre-loading failure scenarios
-             return jsonify({"error": "Model loading failed or not loaded, cannot process request"}), 500
+            # This case covers both lazy loading failure and pre-loading failure scenarios
+            return jsonify({"error": "Model loading failed or not loaded, cannot process request"}), 500
     except Exception as e:
         return jsonify({"error": f"Critical error occurred during model loading: {e}"}), 500
     
@@ -1253,7 +1253,6 @@ def transcribe_audio():
     if ENABLE_LAZY_LOAD:
         global last_request_time
         last_request_time = datetime.datetime.now()
-
 
     # --- 1. Basic validation ---
     if 'file' not in request.files:
@@ -1298,16 +1297,16 @@ def transcribe_audio():
     temp_original_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_{original_filename}")
     target_wav_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}.wav")
     
-    # 用于清理所有临时文件的列表
+    # List for cleaning all temporary files
     temp_files_to_clean = []
 
     try:
-        # --- 2. 保存并统一转换为 16k 单声道 WAV ---
+        # --- 2. Save and uniformly convert to 16k mono WAV ---
         file.save(temp_original_path)
         temp_files_to_clean.append(temp_original_path)
         
-        print(f"[{unique_id}] 正在将 '{original_filename}' 转换为标准 WAV 格式...")
-        # 可选前处理滤波器
+        print(f"[{unique_id}] Converting '{original_filename}' to standard WAV format...")
+        # Optional preprocessing filter
         ffmpeg_filters = []
         if ENABLE_FFMPEG_DENOISE:
             ffmpeg_filters.append(DENOISE_FILTER)
@@ -1320,475 +1319,455 @@ def transcribe_audio():
         ffmpeg_command += [target_wav_path]
         result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"FFmpeg 错误: {result.stderr}")
-            return jsonify({"error": "文件转换失败", "details": result.stderr}), 500
+            print(f"FFmpeg error: {result.stderr}")
+            return jsonify({"error": "File conversion failed", "details": result.stderr}), 500
         temp_files_to_clean.append(target_wav_path)
 
         # --- 2.5 Automatic language detection and validation (when language is not explicitly passed) ---
-    if not language:
-        try:
-            lid_clip_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_lid.wav")
-            temp_files_to_clean.append(lid_clip_path)
-            # Take short segment for fast transcription
-            clip_seconds = max(5, int(LID_CLIP_SECONDS))
-            probe_dur = get_audio_duration(target_wav_path)
-            if probe_dur > 0:
-                clip_seconds = min(clip_seconds, int(math.ceil(probe_dur)))
-            clip_cmd = [
-                'ffmpeg', '-y', '-i', target_wav_path,
-                '-t', str(clip_seconds),
-                '-ac', '1', '-ar', '16000',
-                lid_clip_path
-            ]
-            _res = subprocess.run(clip_cmd, capture_output=True, text=True)
-            if _res.returncode == 0 and os.path.exists(lid_clip_path):
-                # Text-only inference (no timestamps, reduce overhead)
-                with inference_semaphore:
-                    lid_out = safe_transcribe(
-                        local_asr_model,
-                        lid_clip_path,
-                        need_timestamps=False,
-                        batch_size=1,
-                        num_workers=0,
-                    )
-                # Extract text
-                lid_text = ""
-                if isinstance(lid_out, list) and lid_out:
-                    first = lid_out[0]
-                    try:
-                        if hasattr(first, 'text') and first.text:
-                            lid_text = str(first.text)
-                        elif hasattr(first, 'segment') and first.segment:
-                            lid_text = str(first.segment)
-                        else:
-                            lid_text = str(first)
-                    except Exception:
-                        lid_text = str(first)
-
-                # Use lightweight text language detection for language detection
-                if lid_text and lid_text.strip():
-                    try:
+        if not language:
+            try:
+                lid_clip_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_lid.wav")
+                temp_files_to_clean.append(lid_clip_path)
+                # Take short segment for fast transcription
+                clip_seconds = max(5, int(LID_CLIP_SECONDS))
+                probe_dur = get_audio_duration(target_wav_path)
+                if probe_dur > 0:
+                    clip_seconds = min(clip_seconds, int(math.ceil(probe_dur)))
+                clip_cmd = [
+                    'ffmpeg', '-y', '-i', target_wav_path,
+                    '-t', str(clip_seconds),
+                    '-ac', '1', '-ar', '16000',
+                    lid_clip_path
+                ]
+                _res = subprocess.run(clip_cmd, capture_output=True, text=True)
+                if _res.returncode == 0 and os.path.exists(lid_clip_path):
+                    # Text-only inference (no timestamps, reduce overhead)
+                    with inference_semaphore:
+                        lid_out = safe_transcribe(
+                            local_asr_model,
+                            lid_clip_path,
+                            need_timestamps=False,
+                            batch_size=1,
+                            num_workers=0,
+                        )
+                    # Extract text
+                    lid_text = ""
+                    if isinstance(lid_out, list) and lid_out:
+                        first = lid_out[0]
                         try:
-                            from langdetect import detect  # type: ignore
+                            if hasattr(first, 'text') and first.text:
+                                lid_text = str(first.text)
+                            elif hasattr(first, 'segment') and first.segment:
+                                lid_text = str(first.segment)
+                            else:
+                                lid_text = str(first)
                         except Exception:
-                            detect = None  # type: ignore
-                        detected = None
-                        if detect is not None:
-                            detected = detect(lid_text)
-                        # If language can be detected
-                        if detected:
-                            det_primary = str(detected).strip().lower().split('-')[0]
-                            if det_primary:
-                                if det_primary in SUPPORTED_LANG_CODES:
-                                    # Detected supported language, store for later use
-                                    detected_language = det_primary
-                                    print(f"[{unique_id}] Auto-detected language: {detected_language}")
-                                elif ENABLE_AUTO_LANGUAGE_REJECTION:
-                                    # Detected unsupported language and auto-rejection is enabled
-                                    return jsonify({
-                                        "error": {
-                                            "message": f"Unsupported language: {detected}",
-                                            "type": "invalid_request_error",
-                                            "param": "language",
-                                            "code": "unsupported_language"
-                                        }
-                                    }), 400
-                                else:
-                                    # Detected unsupported language but auto-rejection not enabled, default to English
-                                    detected_language = "en"
-                                    print(f"[{unique_id}] Detected unsupported language {detected}, defaulting to English")
-                    except Exception as _e:
-                        # Detection failure doesn't affect main flow, default to English
-                        print(f"[{unique_id}] Language auto-detection failed, defaulting to English: {_e}")
+                            lid_text = str(first)
+
+                    # Use lightweight text language detection for language detection
+                    if lid_text and lid_text.strip():
+                        try:
+                            try:
+                                from langdetect import detect  # type: ignore
+                            except Exception:
+                                detect = None  # type: ignore
+                            detected = None
+                            if detect is not None:
+                                detected = detect(lid_text)
+                            # If language can be detected
+                            if detected:
+                                det_primary = str(detected).strip().lower().split('-')[0]
+                                if det_primary:
+                                    if det_primary in SUPPORTED_LANG_CODES:
+                                        # Detected supported language, store for later use
+                                        detected_language = det_primary
+                                        print(f"[{unique_id}] Auto-detected language: {detected_language}")
+                                    elif ENABLE_AUTO_LANGUAGE_REJECTION:
+                                        # Detected unsupported language and auto-rejection is enabled
+                                        return jsonify({
+                                            "error": {
+                                                "message": f"Unsupported language: {detected}",
+                                                "type": "invalid_request_error",
+                                                "param": "language",
+                                                "code": "unsupported_language"
+                                            }
+                                        }), 400
+                                    else:
+                                        # Detected unsupported language but auto-rejection not enabled, default to English
+                                        detected_language = "en"
+                                        print(f"[{unique_id}] Detected unsupported language {detected}, defaulting to English")
+                        except Exception as _e:
+                            # Detection failure doesn't affect main flow, default to English
+                            print(f"[{unique_id}] Language auto-detection failed, defaulting to English: {_e}")
+                            detected_language = "en"
+                    else:
+                        # Cannot extract text, default to English
+                        print(f"[{unique_id}] Cannot extract text for language detection, defaulting to English")
                         detected_language = "en"
-                else:
-                    # Cannot extract text, default to English
-                    print(f"[{unique_id}] Cannot extract text for language detection, defaulting to English")
-                    detected_language = "en"
-        except Exception as _e:
-            print(f"[{unique_id}] Auto language detection stage exception, defaulting to English: {_e}")
-            detected_language = "en"
-
-    # --- 3. Audio chunking ---
-    # Dynamically adjust chunk size based on GPU memory usage
-    heavy_ts_request = response_format in ['srt', 'vtt', 'verbose_json']
-    if cuda_available:
-        allocated, _, total = get_gpu_memory_usage()
-        memory_usage_ratio = allocated / total if total > 0 else 0
-        
-        if memory_usage_ratio > 0.6:  # If GPU memory usage exceeds 60%
-            # Reduce chunk size to decrease GPU memory pressure
-            adjusted_chunk_minutes = max(3, CHUNK_MINITE - 2)
-            print(f"[{unique_id}] High GPU memory usage ({memory_usage_ratio*100:.1f}%), adjusting chunk size from {CHUNK_MINITE} minutes to {adjusted_chunk_minutes} minutes")
-            CHUNK_DURATION_SECONDS = adjusted_chunk_minutes * 60
+            except Exception as _e:
+                # Language detection failure, default to English
+                print(f"[{unique_id}] Language detection process failed, defaulting to English: {_e}")
+                detected_language = "en"
         else:
-            CHUNK_DURATION_SECONDS = CHUNK_MINITE * 60
-        # Set more conservative upper limit for ≤8~12GB GPU memory devices or requests requiring timestamps to avoid attention matrix OOM
-        try:
-            vram_gb = total
-            cap_env = os.environ.get('CHUNK_SECONDS_CAP', '').strip()
-            if cap_env:
-                cap_sec = int(float(cap_env))
-            else:
-                if vram_gb <= 8.5:
-                    cap_sec = 180 if heavy_ts_request else 240
-                elif vram_gb <= 12.0:
-                    cap_sec = 300 if heavy_ts_request else 480
-                else:
-                    cap_sec = 600
-            if CHUNK_DURATION_SECONDS > cap_sec:
-                print(f"[{unique_id}] Based on GPU VRAM ({vram_gb:.1f}GB){' and timestamps needed' if heavy_ts_request else ''}, limiting chunk duration to {cap_sec}s")
-                CHUNK_DURATION_SECONDS = cap_sec
-        except Exception:
-            pass
-    else:
-        # Use smaller chunks in CPU mode to avoid memory shortage
-        cpu_chunk_minutes = max(3, CHUNK_MINITE // 2)  # Halve chunk size in CPU mode
-        print(f"[{unique_id}] CPU mode, adjusting chunk size to {cpu_chunk_minutes} minutes")
-        CHUNK_DURATION_SECONDS = cpu_chunk_minutes * 60
-        # CPU mode also sets upper limit, especially when timestamps are needed
-        try:
-            cap_env = os.environ.get('CHUNK_SECONDS_CAP', '').strip()
-            cap_sec = int(float(cap_env)) if cap_env else (180 if heavy_ts_request else 240)
-            if CHUNK_DURATION_SECONDS > cap_sec:
-                print(f"[{unique_id}] CPU mode limiting chunk duration to {cap_sec}s")
-                CHUNK_DURATION_SECONDS = cap_sec
-        except Exception:
-            pass
-            
-    total_duration = get_audio_duration(target_wav_path)
-    if total_duration == 0:
-        return jsonify({"error": "Cannot process audio with 0 duration"}), 400
+            # Language was explicitly provided, use the primary part
+            detected_language = language.strip().lower().replace('_', '-').split('-')[0]
 
-    # Check if chunking is needed, if audio duration is less than chunking threshold, process directly
-    if total_duration <= CHUNK_DURATION_SECONDS:
-        print(f"[{unique_id}] Total file duration: {total_duration:.2f}s. Less than chunking threshold ({CHUNK_DURATION_SECONDS}s), no chunking needed.")
-        chunk_paths = [target_wav_path]
-        chunk_info_list = [{'start': 0, 'end': total_duration, 'duration': total_duration}]
-        num_chunks = 1
-    else:
-        # Use overlapping chunking strategy
-        if ENABLE_OVERLAP_CHUNKING:
-            print(f"[{unique_id}] Enabling overlapping chunking mode, overlap duration: {CHUNK_OVERLAP_SECONDS}s")
-            chunk_info_list = create_overlap_chunks(total_duration, CHUNK_DURATION_SECONDS, CHUNK_OVERLAP_SECONDS)
-        else:
-            # Traditional hard chunking
-            num_chunks = math.ceil(total_duration / CHUNK_DURATION_SECONDS)
-            chunk_info_list = []
-            for i in range(num_chunks):
-                start_time = i * CHUNK_DURATION_SECONDS
-                end_time = min(start_time + CHUNK_DURATION_SECONDS, total_duration)
-                chunk_info_list.append({
-                    'start': start_time,
-                    'end': end_time, 
-                    'duration': end_time - start_time
-                })
-        
-        chunk_paths = []
-        num_chunks = len(chunk_info_list)
-        print(f"[{unique_id}] Total file duration: {total_duration:.2f}s. Will be chunked into {num_chunks} pieces.")
-        
-        # If silence alignment is enabled, pre-detect silence intervals
-        silence_intervals = []
-        if ENABLE_SILENCE_ALIGNED_CHUNKING and total_duration > CHUNK_DURATION_SECONDS:
-            print(f"[{unique_id}] Detecting silence intervals for chunk alignment: noise={SILENCE_THRESHOLD_DB}, min_dur={MIN_SILENCE_DURATION}s")
-            silence_intervals = detect_silences_with_ffmpeg(target_wav_path)
-            print(f"[{unique_id}] Detected {len(silence_intervals)} silence intervals")
-
-        for i, chunk_info in enumerate(chunk_info_list):
-            chunk_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_chunk_{i}.wav")
-            chunk_paths.append(chunk_path)
-            temp_files_to_clean.append(chunk_path)
-            
-            start_time = chunk_info['start']
-            # Align chunk start to nearest silence boundary (not exceeding max offset)
-            if ENABLE_SILENCE_ALIGNED_CHUNKING and silence_intervals:
-                aligned_start = find_nearest_silence(start_time, silence_intervals, SILENCE_MAX_SHIFT_SECONDS)
-                if aligned_start != start_time:
-                    print(f"[{unique_id}] Chunk {i+1} start time {start_time:.2f}s aligned to silence {aligned_start:.2f}s")
-                    # Also adjust the end of this chunk, keeping duration unchanged
-                    shift = aligned_start - start_time
-                    start_time = max(0.0, aligned_start)
-                    chunk_info['start'] = start_time
-                    chunk_info['end'] = min(total_duration, chunk_info['end'] + shift)
-                    chunk_info['duration'] = chunk_info['end'] - chunk_info['start']
-            duration = chunk_info['duration']
-            
-            print(f"[{unique_id}] Creating chunk {i+1}/{num_chunks} ({start_time:.1f}s - {chunk_info['end']:.1f}s)...")
-            chunk_command = [
-                'ffmpeg', '-y', '-i', target_wav_path,
-                '-ss', str(start_time),
-                '-t', str(duration),
-                '-c', 'copy',
-                chunk_path
-            ]
-            result = subprocess.run(chunk_command, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"[{unique_id}] ⚠️ Warning creating chunk {i+1}: {result.stderr}")
-                # Continue processing, don't interrupt
-    
-    # --- 4. Loop through transcriptions and merge results ---
-    all_segments = []
-    all_words = []
-    chunk_boundaries = []
-    # Only request timestamps when SRT/VTT/verbose_json is needed, reducing GPU memory and computation
-    need_timestamps = response_format in ['srt', 'vtt', 'verbose_json']
-    # When long subtitle splitting is needed and word-level timestamp-based splitting is enabled, also try to collect word-level timestamps
-    collect_word_timestamps = (response_format == 'verbose_json') or (SPLIT_LONG_SUBTITLES and ENABLE_WORD_TIMESTAMPS_FOR_SPLIT)
-    full_text_parts = []  # When timestamps not needed, directly collect text
-
-    for i, (chunk_path, chunk_info) in enumerate(zip(chunk_paths, chunk_info_list)):
-        print(f"[{unique_id}] Transcribing chunk {i+1}/{num_chunks}...")
-        
-        # Check GPU memory usage, if too high then force cleanup
-        if should_force_cleanup():
-            print(f"[{unique_id}] High GPU memory usage, executing forced cleanup...")
-            aggressive_memory_cleanup()
-        
-        # Show current GPU/CPU memory usage
+        # --- 3. Audio chunking ---
+        # Dynamically adjust chunk size based on GPU memory usage
+        heavy_ts_request = response_format in ['srt', 'vtt', 'verbose_json']
         if cuda_available:
             allocated, _, total = get_gpu_memory_usage()
-            print(f"[{unique_id}] GPU memory usage before processing chunk {i+1}: {allocated:.2f}GB / {total:.2f}GB")
-        else:
-            # Show CPU memory usage
-            memory = psutil.virtual_memory()
-            print(f"[{unique_id}] CPU memory usage before processing chunk {i+1}: {memory.used/1024**3:.2f}GB / {memory.total/1024**3:.2f}GB ({memory.percent:.1f}%)")
-        
-        # Transcribe current chunk
-        # Use with torch.cuda.amp.autocast() to run inference in half-precision
-        # Inference mode further reduces memory/overhead, concurrency control to avoid OOM
-        with inference_semaphore:
-            output = safe_transcribe(
-                local_asr_model,
-                chunk_path,
-                need_timestamps=need_timestamps,
-                batch_size=TRANSCRIBE_BATCH_SIZE,
-                num_workers=TRANSCRIBE_NUM_WORKERS,
-            )
-
-        # Immediate memory cleanup
-        if AGGRESSIVE_MEMORY_CLEANUP:
-            aggressive_memory_cleanup()
-        else:
-            if cuda_available:
-                try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-            gc.collect()
-        
-        # Record chunk boundaries for later merging
-        chunk_start_offset = chunk_info['start']
-        chunk_boundaries.append(chunk_start_offset)
-        
-        if need_timestamps:
-            if output and getattr(output[0], 'timestamp', None):
-                # Correct and collect segment timestamps
-                if 'segment' in output[0].timestamp:
-                    for seg in output[0].timestamp['segment']:
-                        seg['start'] += chunk_start_offset
-                        seg['end'] += chunk_start_offset
-                        all_segments.append(seg)
-                # Correct and collect word timestamps (only needed for verbose_json)
-                if collect_word_timestamps and 'word' in output[0].timestamp:
-                    for word in output[0].timestamp['word']:
-                        word['start'] += chunk_start_offset
-                        word['end'] += chunk_start_offset
-                        all_words.append(word)
+            memory_usage_ratio = allocated / total if total > 0 else 0
+            
+            if memory_usage_ratio > 0.6:  # If GPU memory usage exceeds 60%
+                # Reduce chunk size to decrease GPU memory pressure
+                adjusted_chunk_minutes = max(3, CHUNK_MINITE - 2)
+                print(f"[{unique_id}] High GPU memory usage ({memory_usage_ratio*100:.1f}%), adjusting chunk size from {CHUNK_MINITE} minutes to {adjusted_chunk_minutes} minutes")
+                CHUNK_DURATION_SECONDS = adjusted_chunk_minutes * 60
             else:
-                # Some models/configurations may not return timestamps, try direct text fallback
-                if isinstance(output, list) and output:
-                    full_text_parts.append(str(output[0]))
-        else:
-            # No timestamps needed, directly get text
-            if isinstance(output, list) and output:
-                # NeMo returned elements might be Hypothesis objects, prioritize extracting .text or .segment fields
-                first = output[0]
-                try:
-                    # Prioritize common attributes
-                    if hasattr(first, 'text') and first.text:
-                        full_text_parts.append(str(first.text))
-                    elif hasattr(first, 'segment') and first.segment:
-                        full_text_parts.append(str(first.segment))
-                    else:
-                        full_text_parts.append(str(first))
-                except Exception:
-                    full_text_parts.append(str(first))
-        
-        # Release temporary output reference
-        try:
-            del output
-        except Exception:
-            pass
-        # Immediately delete processed chunk files to save disk space and memory
-        if num_chunks > 1 and os.path.exists(chunk_path):
+                CHUNK_DURATION_SECONDS = CHUNK_MINITE * 60
+            # Set more conservative upper limit for ≤8~12GB GPU memory devices or requests requiring timestamps to avoid attention matrix OOM
             try:
-                os.remove(chunk_path)
-                temp_files_to_clean.remove(chunk_path)
-                print(f"[{unique_id}] Deleted processed chunk file: chunk_{i}")
-            except Exception as e:
-                print(f"[{unique_id}] Error deleting chunk file: {e}")
+                vram_gb = total
+                cap_env = os.environ.get('CHUNK_SECONDS_CAP', '').strip()
+                if cap_env:
+                    cap_sec = int(float(cap_env))
+                else:
+                    if vram_gb <= 8.5:
+                        cap_sec = 180 if heavy_ts_request else 240
+                    elif vram_gb <= 12.0:
+                        cap_sec = 300 if heavy_ts_request else 480
+                    else:
+                        cap_sec = 600
+                if CHUNK_DURATION_SECONDS > cap_sec:
+                    print(f"[{unique_id}] Based on GPU VRAM ({vram_gb:.1f}GB){' and timestamps needed' if heavy_ts_request else ''}, limiting chunk duration to {cap_sec}s")
+                    CHUNK_DURATION_SECONDS = cap_sec
+            except Exception:
+                pass
+        else:
+            # Use smaller chunks in CPU mode to avoid memory shortage
+            cpu_chunk_minutes = max(3, CHUNK_MINITE // 2)  # Halve chunk size in CPU mode
+            print(f"[{unique_id}] CPU mode, adjusting chunk size to {cpu_chunk_minutes} minutes")
+            CHUNK_DURATION_SECONDS = cpu_chunk_minutes * 60
+            # CPU mode also sets upper limit, especially when timestamps are needed
+            try:
+                cap_env = os.environ.get('CHUNK_SECONDS_CAP', '').strip()
+                cap_sec = int(float(cap_env)) if cap_env else (180 if heavy_ts_request else 240)
+                if CHUNK_DURATION_SECONDS > cap_sec:
+                    print(f"[{unique_id}] CPU mode limiting chunk duration to {cap_sec}s")
+                    CHUNK_DURATION_SECONDS = cap_sec
+            except Exception:
+                pass
+                
+        total_duration = get_audio_duration(target_wav_path)
+        if total_duration == 0:
+            return jsonify({"error": "Cannot process audio with 0 duration"}), 400
 
-    print(f"[{unique_id}] All chunks transcribed, merging results.")
-    
-    # --- 4.5. Process overlapping regions and merge segments ---
-    if ENABLE_OVERLAP_CHUNKING and len(chunk_boundaries) > 1:
-        print(f"[{unique_id}] Processing overlapping regions, removing duplicate content...")
-        all_segments = merge_overlapping_segments(all_segments, chunk_boundaries, CHUNK_OVERLAP_SECONDS)
-        print(f"[{unique_id}] Overlap processing completed, final segment count: {len(all_segments)}")
+        # Check if chunking is needed, if audio duration is less than chunking threshold, process directly
+        if total_duration <= CHUNK_DURATION_SECONDS:
+            print(f"[{unique_id}] Total file duration: {total_duration:.2f}s. Less than chunking threshold ({CHUNK_DURATION_SECONDS}s), no chunking needed.")
+            chunk_paths = [target_wav_path]
+            chunk_info_list = [{'start': 0, 'end': total_duration, 'duration': total_duration}]
+            num_chunks = 1
+        else:
+            # Use overlapping chunking strategy
+            if ENABLE_OVERLAP_CHUNKING:
+                print(f"[{unique_id}] Enabling overlapping chunking mode, overlap duration: {CHUNK_OVERLAP_SECONDS}s")
+                chunk_info_list = create_overlap_chunks(total_duration, CHUNK_DURATION_SECONDS, CHUNK_OVERLAP_SECONDS)
+            else:
+                # Traditional hard chunking
+                num_chunks = math.ceil(total_duration / CHUNK_DURATION_SECONDS)
+                chunk_info_list = []
+                for i in range(num_chunks):
+                    start_time = i * CHUNK_DURATION_SECONDS
+                    end_time = min(start_time + CHUNK_DURATION_SECONDS, total_duration)
+                    chunk_info_list.append({
+                        'start': start_time,
+                        'end': end_time, 
+                        'duration': end_time - start_time
+                    })
+            
+            chunk_paths = []
+            num_chunks = len(chunk_info_list)
+            print(f"[{unique_id}] Total file duration: {total_duration:.2f}s. Will be chunked into {num_chunks} pieces.")
+            
+            # If silence alignment is enabled, pre-detect silence intervals
+            silence_intervals = []
+            if ENABLE_SILENCE_ALIGNED_CHUNKING and total_duration > CHUNK_DURATION_SECONDS:
+                print(f"[{unique_id}] Detecting silence intervals for chunk alignment: noise={SILENCE_THRESHOLD_DB}, min_dur={MIN_SILENCE_DURATION}s")
+                silence_intervals = detect_silences_with_ffmpeg(target_wav_path)
+                print(f"[{unique_id}] Detected {len(silence_intervals)} silence intervals")
 
-    # --- 4.6. Subtitle post-processing: merge/extend short subtitles to avoid flickering ---
-    if MERGE_SHORT_SUBTITLES and all_segments:
-        before_cnt = len(all_segments)
-        all_segments = enforce_min_subtitle_duration(
-            all_segments,
-            min_duration=MIN_SUBTITLE_DURATION_SECONDS,
-            merge_max_gap=SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS,
-            min_chars=SHORT_SUBTITLE_MIN_CHARS,
-            min_gap=SUBTITLE_MIN_GAP_SECONDS,
-        )
-        print(f"[{unique_id}] Subtitle post-processing completed: {before_cnt} -> {len(all_segments)} segments (minimum duration {MIN_SUBTITLE_DURATION_SECONDS}s)")
+            for i, chunk_info in enumerate(chunk_info_list):
+                chunk_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_id}_chunk_{i}.wav")
+                chunk_paths.append(chunk_path)
+                temp_files_to_clean.append(chunk_path)
+                
+                start_time = chunk_info['start']
+                # Align chunk start to nearest silence boundary (not exceeding max offset)
+                if ENABLE_SILENCE_ALIGNED_CHUNKING and silence_intervals:
+                    aligned_start = find_nearest_silence(start_time, silence_intervals, SILENCE_MAX_SHIFT_SECONDS)
+                    if aligned_start != start_time:
+                        print(f"[{unique_id}] Chunk {i+1} start time {start_time:.2f}s aligned to silence {aligned_start:.2f}s")
+                        # Also adjust the end of this chunk, keeping duration unchanged
+                        shift = aligned_start - start_time
+                        start_time = max(0.0, aligned_start)
+                        chunk_info['start'] = start_time
+                        chunk_info['end'] = min(total_duration, chunk_info['end'] + shift)
+                        chunk_info['duration'] = chunk_info['end'] - chunk_info['start']
+                duration = chunk_info['duration']
+                
+                print(f"[{unique_id}] Creating chunk {i+1}/{num_chunks} ({start_time:.1f}s - {chunk_info['end']:.1f}s)...")
+                chunk_command = [
+                    'ffmpeg', '-y', '-i', target_wav_path,
+                    '-ss', str(start_time),
+                    '-t', str(duration),
+                    '-c', 'copy',
+                    chunk_path
+                ]
+                result = subprocess.run(chunk_command, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"[{unique_id}] ⚠️ Warning creating chunk {i+1}: {result.stderr}")
+                    # Continue processing, don't interrupt
+        
+        # --- 4. Loop through transcriptions and merge results ---
+        all_segments = []
+        all_words = []
+        chunk_boundaries = []
+        # Only request timestamps when SRT/VTT/verbose_json is needed, reducing GPU memory and computation
+        need_timestamps = response_format in ['srt', 'vtt', 'verbose_json']
+        # When long subtitle splitting is needed and word-level timestamp-based splitting is enabled, also try to collect word-level timestamps
+        collect_word_timestamps = (response_format == 'verbose_json') or (SPLIT_LONG_SUBTITLES and ENABLE_WORD_TIMESTAMPS_FOR_SPLIT)
+        full_text_parts = []  # When timestamps not needed, directly collect text
 
-    # --- 4.7. Long subtitle splitting (by duration/character count limits) ---
-    if SPLIT_LONG_SUBTITLES and all_segments:
-        before_cnt = len(all_segments)
-        all_segments = split_and_wrap_long_subtitles(
-            segments=all_segments,
-            words=all_words if collect_word_timestamps else None,
-            max_duration=MAX_SUBTITLE_DURATION_SECONDS,
-            max_chars=MAX_SUBTITLE_CHARS_PER_SEGMENT,
-            preferred_line_length=PREFERRED_LINE_LENGTH,
-            max_lines=MAX_SUBTITLE_LINES,
-            punctuation=SUBTITLE_SPLIT_PUNCTUATION,
-        )
-        print(f"[{unique_id}] Long subtitle splitting completed: {before_cnt} -> {len(all_segments)} segments (max duration {MAX_SUBTITLE_DURATION_SECONDS}s, max chars {MAX_SUBTITLE_CHARS_PER_SEGMENT})")
+        for i, (chunk_path, chunk_info) in enumerate(zip(chunk_paths, chunk_info_list)):
+            print(f"[{unique_id}] Transcribing chunk {i+1}/{num_chunks}...")
+            
+            # Check GPU memory usage, if too high then force cleanup
+            if should_force_cleanup():
+                print(f"[{unique_id}] High GPU memory usage, executing forced cleanup...")
+                aggressive_memory_cleanup()
+            
+            # Show current GPU/CPU memory usage
+            if cuda_available:
+                allocated, _, total = get_gpu_memory_usage()
+                print(f"[{unique_id}] GPU memory usage before processing chunk {i+1}: {allocated:.2f}GB / {total:.2f}GB")
+            else:
+                # Show CPU memory usage
+                memory = psutil.virtual_memory()
+                print(f"[{unique_id}] CPU memory usage before processing chunk {i+1}: {memory.used/1024**3:.2f}GB / {memory.total/1024**3:.2f}GB ({memory.percent:.1f}%)")
+            
+            # Transcribe current chunk
+            # Use with torch.cuda.amp.autocast() to run inference in half-precision
+            # Inference mode further reduces memory/overhead, concurrency control to avoid OOM
+            with inference_semaphore:
+                output = safe_transcribe(
+                    local_asr_model,
+                    chunk_path,
+                    need_timestamps=need_timestamps,
+                    batch_size=TRANSCRIBE_BATCH_SIZE,
+                    num_workers=TRANSCRIBE_NUM_WORKERS,
+                )
 
-    # --- 5. Format final output ---
-    # If neither timestamp segments nor direct text, consider as failure;
-    # otherwise even if no segments (e.g., model returns pure text only), should return text result.
-    if not all_segments and not full_text_parts:
-        return jsonify({"error": "Transcription failed, model did not return any valid content"}), 500
+            # Immediate memory cleanup
+            if AGGRESSIVE_MEMORY_CLEANUP:
+                aggressive_memory_cleanup()
+            else:
+                if cuda_available:
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                gc.collect()
+            
+            # Record chunk boundaries for later merging
+            chunk_start_offset = chunk_info['start']
+            chunk_boundaries.append(chunk_start_offset)
+            
+            if need_timestamps:
+                if output and getattr(output[0], 'timestamp', None):
+                    # Correct and collect segment timestamps
+                    if 'segment' in output[0].timestamp:
+                        for seg in output[0].timestamp['segment']:
+                            seg['start'] += chunk_start_offset
+                            seg['end'] += chunk_start_offset
+                            all_segments.append(seg)
+                    # Correct and collect word timestamps (only needed for verbose_json)
+                    if collect_word_timestamps and 'word' in output[0].timestamp:
+                        for word in output[0].timestamp['word']:
+                            word['start'] += chunk_start_offset
+                            word['end'] += chunk_start_offset
+                            all_words.append(word)
+                else:
+                    # Some models/configurations may not return timestamps, try direct text fallback
+                    if isinstance(output, list) and output:
+                        full_text_parts.append(str(output[0]))
+            else:
+                # No timestamps needed, directly get text
+                if isinstance(output, list) and output:
+                    # NeMo returned elements might be Hypothesis objects, prioritize extracting .text or .segment fields
+                    first = output[0]
+                    try:
+                        # Prioritize common attributes
+                        if hasattr(first, 'text') and first.text:
+                            full_text_parts.append(str(first.text))
+                        elif hasattr(first, 'segment') and first.segment:
+                            full_text_parts.append(str(first.segment))
+                        else:
+                            full_text_parts.append(str(first))
+                    except Exception:
+                        full_text_parts.append(str(first))
+            
+            # Release temporary output reference
+            try:
+                del output
+            except Exception:
+                pass
+            # Immediately delete processed chunk files to save disk space and memory
+            if num_chunks > 1 and os.path.exists(chunk_path):
+                try:
+                    os.remove(chunk_path)
+                    temp_files_to_clean.remove(chunk_path)
+                    print(f"[{unique_id}] Deleted processed chunk file: chunk_{i}")
+                except Exception as e:
+                    print(f"[{unique_id}] Error deleting chunk file: {e}")
 
-    # Build complete transcription text
-    full_text = " ".join([seg['segment'].strip() for seg in all_segments if seg['segment'].strip()])
-    
-    # Return different formats based on response_format
-    if response_format == 'text':
-        if not full_text:
-            # When timestamps not enabled and directly collecting text
-            full_text = " ".join(full_text_parts) if full_text_parts else ""
-        return Response(full_text, mimetype='text/plain')
-    elif response_format == 'srt':
-        srt_result = segments_to_srt(all_segments)
-        return Response(srt_result, mimetype='text/plain')
-    elif response_format == 'vtt':
-        vtt_result = segments_to_vtt(all_segments)
-        return Response(vtt_result, mimetype='text/plain')
-    elif response_format == 'verbose_json':
-        # Detailed JSON format, containing more information
-        response_data = {
-            "task": "transcribe",
-            "language": language or detected_language or "en",
-            "duration": total_duration,
-            "text": full_text,
-            "segments": [
-                {
-                    "id": i,
-                    "seek": int(seg['start'] * 100),  # Convert to centiseconds
-                    "start": seg['start'],
-                    "end": seg['end'],
-                    "text": seg['segment'].strip(),
-                    "tokens": [],  # NeMo doesn't provide tokens, leave empty
-                    "temperature": temperature,
-                    "avg_logprob": -0.5,  # Simulation value
-                    "compression_ratio": 1.0,  # Simulation value
-                    "no_speech_prob": 0.0,  # Simulation value
-                    "words": [
-                        {
-                            "word": word['word'],
-                            "start": word['start'],
-                            "end": word['end'],
-                            "probability": 0.9  # Simulation value
-                        }
-                        for word in all_words 
-                        if word['start'] >= seg['start'] and word['end'] <= seg['end']
-                    ] if all_words else []
-                }
-                for i, seg in enumerate(all_segments) if seg['segment'].strip()
-            ]
-        }
-        return jsonify(response_data)
-    else:
-        # Default JSON format (response_format == 'json')
-        if not all_segments:
-            # When timestamps not enabled, text comes from direct output
+        print(f"[{unique_id}] All chunks transcribed, merging results.")
+        
+        # --- 4.5. Process overlapping regions and merge segments ---
+        if ENABLE_OVERLAP_CHUNKING and len(chunk_boundaries) > 1:
+            print(f"[{unique_id}] Processing overlapping regions, removing duplicate content...")
+            all_segments = merge_overlapping_segments(all_segments, chunk_boundaries, CHUNK_OVERLAP_SECONDS)
+            print(f"[{unique_id}] Overlap processing completed, final segment count: {len(all_segments)}")
+
+        # --- 4.6. Subtitle post-processing: merge/extend short subtitles to avoid flickering ---
+        if MERGE_SHORT_SUBTITLES and all_segments:
+            before_cnt = len(all_segments)
+            all_segments = enforce_min_subtitle_duration(
+                all_segments,
+                min_duration=MIN_SUBTITLE_DURATION_SECONDS,
+                merge_max_gap=SHORT_SUBTITLE_MERGE_MAX_GAP_SECONDS,
+                min_chars=SHORT_SUBTITLE_MIN_CHARS,
+                min_gap=SUBTITLE_MIN_GAP_SECONDS,
+            )
+            print(f"[{unique_id}] Subtitle post-processing completed: {before_cnt} -> {len(all_segments)} segments (minimum duration {MIN_SUBTITLE_DURATION_SECONDS}s)")
+
+        # --- 4.7. Long subtitle splitting (by duration/character count limits) ---
+        if SPLIT_LONG_SUBTITLES and all_segments:
+            before_cnt = len(all_segments)
+            all_segments = split_and_wrap_long_subtitles(
+                segments=all_segments,
+                words=all_words if collect_word_timestamps else None,
+                max_duration=MAX_SUBTITLE_DURATION_SECONDS,
+                max_chars=MAX_SUBTITLE_CHARS_PER_SEGMENT,
+                preferred_line_length=PREFERRED_LINE_LENGTH,
+                max_lines=MAX_SUBTITLE_LINES,
+                punctuation=SUBTITLE_SPLIT_PUNCTUATION,
+            )
+            print(f"[{unique_id}] Long subtitle splitting completed: {before_cnt} -> {len(all_segments)} segments (max duration {MAX_SUBTITLE_DURATION_SECONDS}s, max chars {MAX_SUBTITLE_CHARS_PER_SEGMENT})")
+
+        # --- 5. Format final output ---
+        # If neither timestamp segments nor direct text, consider as failure;
+        # otherwise even if no segments (e.g., model returns pure text only), should return text result.
+        if not all_segments and not full_text_parts:
+            return jsonify({"error": "Transcription failed, model did not return any valid content"}), 500
+
+        # Build complete transcription text
+        full_text = " ".join([seg['segment'].strip() for seg in all_segments if seg['segment'].strip()])
+        
+        # Return different formats based on response_format
+        if response_format == 'text':
             if not full_text:
+                # When timestamps not enabled and directly collecting text
                 full_text = " ".join(full_text_parts) if full_text_parts else ""
-        response_data = {"text": full_text}
-        return jsonify(response_data)
+            return Response(full_text, mimetype='text/plain')
+        elif response_format == 'srt':
+            srt_result = segments_to_srt(all_segments)
+            return Response(srt_result, mimetype='text/plain')
+        elif response_format == 'vtt':
+            vtt_result = segments_to_vtt(all_segments)
+            return Response(vtt_result, mimetype='text/plain')
+        elif response_format == 'verbose_json':
+            # Detailed JSON format, containing more information
+            response_data = {
+                "task": "transcribe",
+                "language": language or detected_language or "en",
+                "duration": total_duration,
+                "text": full_text,
+                "segments": [
+                    {
+                        "id": i,
+                        "seek": int(seg['start'] * 100),  # Convert to centiseconds
+                        "start": seg['start'],
+                        "end": seg['end'],
+                        "text": seg['segment'].strip(),
+                        "tokens": [],  # NeMo doesn't provide tokens, leave empty
+                        "temperature": temperature,
+                        "avg_logprob": -0.5,  # Simulation value
+                        "compression_ratio": 1.0,  # Simulation value
+                        "no_speech_prob": 0.0,  # Simulation value
+                        "words": [
+                            {
+                                "word": word['word'],
+                                "start": word['start'],
+                                "end": word['end'],
+                                "probability": 0.9  # Simulation value
+                            }
+                            for word in all_words 
+                            if word['start'] >= seg['start'] and word['end'] <= seg['end']
+                        ] if all_words else []
+                    }
+                    for i, seg in enumerate(all_segments) if seg['segment'].strip()
+                ]
+            }
+            return jsonify(response_data)
+        else:
+            # Default JSON format (response_format == 'json')
+            if not all_segments:
+                # When timestamps not enabled, text comes from direct output
+                if not full_text:
+                    full_text = " ".join(full_text_parts) if full_text_parts else ""
+            response_data = {"text": full_text}
+            return jsonify(response_data)
 
     except Exception as e:
-        print(f"处理过程中发生严重错误: {e}")
+        print(f"Serious error occurred during processing: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({"error": "服务器内部错误", "details": str(e)}), 500
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
     finally:
-        # --- 6. 清理所有临时文件 ---
-        print(f"[{unique_id}] 清理临时文件...")
+        # --- 6. Clean up all temporary files ---
+        print(f"[{unique_id}] Cleaning temporary files...")
         for f_path in temp_files_to_clean:
             if os.path.exists(f_path):
                 os.remove(f_path)
-        print(f"[{unique_id}] 临时文件已清理。")
+        print(f"[{unique_id}] Temporary files cleaned.")
         
-        # --- 7. 立即执行请求后清理 ---
+        # --- 7. Execute immediate post-request cleanup ---
         immediate_post_request_cleanup()
         
-        # --- 8. 强制清理内存，避免累积 ---
-        print(f"[{unique_id}] 执行最终内存清理...")
+        # --- 8. Force memory cleanup to avoid accumulation ---
+        print(f"[{unique_id}] Executing final memory cleanup...")
         if cuda_available:
             allocated_before, _, total = get_gpu_memory_usage()
-            print(f"[{unique_id}] 清理前显存使用: {allocated_before:.2f}GB / {total:.2f}GB")
+            print(f"[{unique_id}] GPU memory usage before cleanup: {allocated_before:.2f}GB / {total:.2f}GB")
         else:
             memory_before = psutil.virtual_memory()
-            print(f"[{unique_id}] 清理前内存使用: {memory_before.used/1024**3:.2f}GB / {memory_before.total/1024**3:.2f}GB")
+            print(f"[{unique_id}] Memory usage before cleanup: {memory_before.used/1024**3:.2f}GB / {memory_before.total/1024**3:.2f}GB")
         
-        # 执行标准内存清理
+        # Execute standard memory cleanup
         aggressive_memory_cleanup()
         try_malloc_trim()
         
         if cuda_available:
             allocated_after, _, total = get_gpu_memory_usage()
-            print(f"[{unique_id}] 清理后显存使用: {allocated_after:.2f}GB / {total:.2f}GB")
+            print(f"[{unique_id}] GPU memory usage after cleanup: {allocated_after:.2f}GB / {total:.2f}GB")
             if allocated_before > 0:
-                print(f"[{unique_id}] 释放显存: {allocated_before - allocated_after:.2f}GB")
+                print(f"[{unique_id}] Released GPU memory: {allocated_before - allocated_after:.2f}GB")
         else:
             memory_after = psutil.virtual_memory()
-            print(f"[{unique_id}] 清理后内存使用: {memory_after.used/1024**3:.2f}GB / {memory_after.total/1024**3:.2f}GB")
-        print(f"[{unique_id}] 内存清理完成。")
-
-
-def segments_to_vtt(segments: list) -> str:
-    """将 NeMo 的分段时间戳转换为 VTT 格式字符串"""
-    vtt_content = ["WEBVTT", ""]
-    
-    for i, segment in enumerate(segments):
-        start_time = format_vtt_time(segment['start'])
-        end_time = format_vtt_time(segment['end'])
-        text = segment['segment'].strip()
-        if text and PREFERRED_LINE_LENGTH > 0:
-            text = wrap_text_for_display(
-                text,
-                preferred_line_length=PREFERRED_LINE_LENGTH,
-                max_lines=MAX_SUBTITLE_LINES,
-            )
-        
-        if text:  # 仅添加有内容的字幕
-            vtt_content.append(f"{start_time} --> {end_time}")
-            vtt_content.append(text)
-            vtt_content.append("")  # 空行分隔
-            
-    return "\n".join(vtt_content)
-
+            print(f"[{unique_id}] Memory usage after cleanup: {memory_after.used/1024**3:.2f}GB / {memory_after.total/1024**3:.2f}GB")
+        print(f"[{unique_id}] Memory cleanup completed.")
 
 def format_vtt_time(seconds: float) -> str:
     """将秒数格式化为 VTT 时间戳格式 HH:MM:SS.mmm"""
